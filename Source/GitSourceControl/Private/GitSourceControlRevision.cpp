@@ -6,7 +6,9 @@
 #include "GitSourceControlRevision.h"
 
 #include "HAL/FileManager.h"
+#include "Containers/StringConv.h"
 #include "Misc/Paths.h"
+#include "Misc/SecureHash.h"
 #include "Modules/ModuleManager.h"
 #include "GitSourceControlModule.h"
 #include "GitSourceControlUtils.h"
@@ -39,13 +41,15 @@ bool FGitSourceControlRevision::Get( FString& InOutFilename ) const
 		PathToRepositoryRoot = PathToRepoRoot;
 	}
 
-	// if a filename for the temp file wasn't supplied generate a unique-ish one
+	// if a filename for the temp file wasn't supplied generate one for this revision
 	if(InOutFilename.Len() == 0)
 	{
 		// create the diff dir if we don't already have it (Git wont)
 		IFileManager::Get().MakeDirectory(*FPaths::DiffDir(), true);
-		// create a unique temp file name based on the unique commit Id
-		const FString TempFileName = FString::Printf(TEXT("%stemp-%s-%s"), *FPaths::DiffDir(), *CommitId, *FPaths::GetCleanFilename(Filename));
+		const FString AssetPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(PathToRepositoryRoot, Filename));
+		const FTCHARToUTF8 AssetPathUtf8(*AssetPath);
+		const FString AssetId = FMD5::HashBytes(reinterpret_cast<const uint8*>(AssetPathUtf8.Get()), AssetPathUtf8.Length());
+		const FString TempFileName = FString::Printf(TEXT("%stemp-%s-%s-%s"), *FPaths::DiffDir(), *CommitId, *AssetId, *FPaths::GetCleanFilename(Filename));
 		InOutFilename = FPaths::ConvertRelativePathToFull(TempFileName);
 	}
 

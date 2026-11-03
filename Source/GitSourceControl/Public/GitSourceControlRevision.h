@@ -10,7 +10,7 @@
 #include "Misc/DateTime.h"
 
 /** Revision of a file, linked to a specific commit */
-class FGitSourceControlRevision : public ISourceControlRevision
+class GITSOURCECONTROL_API FGitSourceControlRevision : public ISourceControlRevision
 {
 public:
 	/** ISourceControlRevision interface */
