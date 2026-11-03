@@ -464,6 +464,24 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 
 	TArray<FString> AbsoluteFiles = SourceControlHelpers::AbsoluteFilenames(InFiles);
 
+#if ENGINE_MAJOR_VERSION == 5
+	if (InOperation->GetName() == "CheckIn" && InChangelist.IsValid() && AbsoluteFiles.IsEmpty())
+	{
+		const TSharedPtr<FGitSourceControlChangelist, ESPMode::ThreadSafe> GitChangelist = StaticCastSharedPtr<FGitSourceControlChangelist>(InChangelist);
+		for (const FSourceControlStateRef& State : GetStateInternal(*GitChangelist)->GetFilesStates())
+		{
+			AbsoluteFiles.Add(State->GetFilename());
+		}
+		if (AbsoluteFiles.IsEmpty())
+		{
+			const FText Message = LOCTEXT("EmptyChangelistSubmit", "The selected changelist has no files to submit.");
+			InOperation->AddErrorMessge(Message);
+			InOperationCompleteDelegate.ExecuteIfBound(InOperation, ECommandResult::Failed);
+			return ECommandResult::Failed;
+		}
+	}
+#endif
+
 	// Query to see if we allow this operation
 	TSharedPtr<IGitSourceControlWorker, ESPMode::ThreadSafe> Worker = CreateWorker(InOperation->GetName());
 	if(!Worker.IsValid())
