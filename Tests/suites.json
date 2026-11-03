@@ -1,0 +1,6 @@
+{
+  "all": "UEGitPlugin",
+  "unit": "UEGitPlugin.Unit",
+  "integration": "UEGitPlugin.Integration",
+  "editor": "UEGitPlugin.Editor"
+}

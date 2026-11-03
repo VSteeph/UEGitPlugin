@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "",
+	"Category": "Development",
+	"Description": "Isolated editor host for Git source control automation.",
+	"Modules": [
+		{
+			"Name": "GitSourceControlTestHost",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "GitSourceControlTests",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "GitSourceControl",
+			"Enabled": true
+		}
+	]
+}
