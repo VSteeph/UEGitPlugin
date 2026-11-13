@@ -26,12 +26,12 @@ All Git operations (branches, commits, pushes, pulls, merges) must be done in an
 
 1. Open Unreal Editor and click **Revision Control → Connect to Revision Control**.
 2. Select **Git LFS 2** as the provider.
-3. Verify the **Git Path** (auto-detected if left blank).
-4. **Uses Git LFS** is enabled by default.
-   **LFS username** is pre-filled with the lock owner name reported by your Git host once the plugin has seen one of your locks, otherwise with your local Git `user.name`.
+3. Verify the **Git Path** (auto-detected if left blank). Git LFS must be installed and available to Git.
+4. **LFS Username** is pre-filled with the lock owner name reported by your Git host once the plugin has seen one of your locks, otherwise with your local Git `user.name`.
    Make sure it matches the lock owner name reported by your Git host (for example, your GitHub/GitLab username if it differs from your Git display name).
    The pre-filled value is only saved once you confirm the field.
-5. Click **Accept Settings**.
+5. Choose the **Unlock Mode** (`OnMerge` by default, `OnPush`, or `None`).
+6. Click **Accept Settings**.
 
 ## Configuration Options
 
@@ -56,10 +56,11 @@ If you need extra branches checked (for example `origin/promoted`), call `ISourc
 1. **Lock (`Check Out`):** Before editing an asset, check it out in Unreal. The plugin fetches the remote base and tracking branches, blocks if a teammate already holds the lock or if remote has a newer revision, and runs `git lfs lock`. Unlocked tracked files remain read-only on disk.
 2. **Revert:** Discard local modifications, with or without releasing the lock (see [Revert](#revert)).
 3. **Manual Unlock:** Use **Revert and Unlock**, or `git lfs unlock` from a terminal.
-4. **Unlock Mode** *(planned)*: Automatic unlock policy configured in the plugin settings:
-   * `OnMerge` *(default)*: automatically unlocks via Git hook when your commit lands on the remote base branch.
-   * `OnPush`: automatically unlocks when you push.
+4. **Unlock Mode:** Automatic unlock policy configured in the plugin settings and enforced by a managed Git `reference-transaction` hook (works even when Unreal is closed):
+   * `OnMerge` *(default)*: automatically unlocks files changed on the remote base branch when their local working copy is clean and identical.
+   * `OnPush`: automatically unlocks files as soon as they reach any remote branch (seen by a push or a fetch) when their local working copy is clean and identical.
    * `None`: manual unlock only.
+   Files with uncommitted local modifications are never unlocked automatically.
 
 ## Asset Icons
 

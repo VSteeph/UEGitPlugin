@@ -52,6 +52,10 @@ public:
 
 	/** Temporary states for results */
 	TMap<const FString, FGitState> States;
+
+private:
+	/** After a failed lock, tells apart another user winning the lock from a server or network failure. */
+	void ReportLocksTakenByOthers(class FGitSourceControlCommand& InCommand, const TArray<FString>& InLockableFiles, const FString& InLockUser);
 };
 
 /** Add an untracked file to revision control (so only a subset of the git add command). */

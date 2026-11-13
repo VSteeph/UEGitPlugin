@@ -66,14 +66,77 @@ bool FGitSourceControlSettings::SetLfsUserName(const FString& InString)
 	return bChanged;
 }
 
+EGitUnlockMode FGitSourceControlSettings::GetUnlockMode() const
+{
+	FScopeLock ScopeLock(&CriticalSection);
+	return UnlockMode;
+}
+
+bool FGitSourceControlSettings::SetUnlockMode(EGitUnlockMode InUnlockMode)
+{
+	FScopeLock ScopeLock(&CriticalSection);
+	const bool bChanged = (UnlockMode != InUnlockMode);
+	if (bChanged)
+	{
+		UnlockMode = InUnlockMode;
+	}
+	return bChanged;
+}
+
+FString FGitSourceControlSettings::UnlockModeToString(EGitUnlockMode InUnlockMode)
+{
+	switch (InUnlockMode)
+	{
+	case EGitUnlockMode::OnMerge:
+		return TEXT("OnMerge");
+	case EGitUnlockMode::OnPush:
+		return TEXT("OnPush");
+	case EGitUnlockMode::None:
+		return TEXT("None");
+	default:
+		return TEXT("OnMerge");
+	}
+}
+
+bool FGitSourceControlSettings::ParseUnlockMode(const FString& InString, EGitUnlockMode& OutUnlockMode)
+{
+	const FString Trimmed = InString.TrimStartAndEnd();
+	if (Trimmed.Equals(TEXT("OnMerge"), ESearchCase::IgnoreCase))
+	{
+		OutUnlockMode = EGitUnlockMode::OnMerge;
+		return true;
+	}
+	if (Trimmed.Equals(TEXT("OnPush"), ESearchCase::IgnoreCase))
+	{
+		OutUnlockMode = EGitUnlockMode::OnPush;
+		return true;
+	}
+	if (Trimmed.Equals(TEXT("None"), ESearchCase::IgnoreCase))
+	{
+		OutUnlockMode = EGitUnlockMode::None;
+		return true;
+	}
+	OutUnlockMode = EGitUnlockMode::OnMerge;
+	return false;
+}
+
 // This is called at startup nearly before anything else in our module: BinaryPath will then be used by the provider
 void FGitSourceControlSettings::LoadSettings()
 {
 	FScopeLock ScopeLock(&CriticalSection);
 	const FString& IniFile = SourceControlHelpers::GetSettingsIni();
 	GConfig->GetString(*GitSettingsConstants::SettingsSection, TEXT("BinaryPath"), BinaryPath, IniFile);
-	GConfig->GetBool(*GitSettingsConstants::SettingsSection, TEXT("UsingGitLfsLocking"), bUsingGitLfsLocking, IniFile);
 	GConfig->GetString(*GitSettingsConstants::SettingsSection, TEXT("LfsUserName"), LfsUserName, IniFile);
+
+	FString UnlockModeString;
+	if (GConfig->GetString(*GitSettingsConstants::SettingsSection, TEXT("UnlockMode"), UnlockModeString, IniFile))
+	{
+		ParseUnlockMode(UnlockModeString, UnlockMode);
+	}
+	else
+	{
+		UnlockMode = EGitUnlockMode::OnMerge;
+	}
 }
 
 void FGitSourceControlSettings::SaveSettings() const
@@ -81,7 +144,7 @@ void FGitSourceControlSettings::SaveSettings() const
 	FScopeLock ScopeLock(&CriticalSection);
 	const FString& IniFile = SourceControlHelpers::GetSettingsIni();
 	GConfig->SetString(*GitSettingsConstants::SettingsSection, TEXT("BinaryPath"), *BinaryPath, IniFile);
-	GConfig->SetBool(*GitSettingsConstants::SettingsSection, TEXT("UsingGitLfsLocking"), bUsingGitLfsLocking, IniFile);
 	GConfig->SetString(*GitSettingsConstants::SettingsSection, TEXT("LfsUserName"), *LfsUserName, IniFile);
+	GConfig->SetString(*GitSettingsConstants::SettingsSection, TEXT("UnlockMode"), *UnlockModeToString(UnlockMode), IniFile);
 	GConfig->Flush(false, IniFile);
 }

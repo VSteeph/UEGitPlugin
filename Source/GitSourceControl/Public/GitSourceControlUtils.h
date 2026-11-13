@@ -15,6 +15,8 @@ class FGitSourceControlCommand;
 
 struct FGitVersion;
 
+enum class EGitUnlockMode : uint8;
+
 struct GITSOURCECONTROL_API FGitLfsLockInfo
 {
 	FString LockUser;
@@ -42,10 +44,18 @@ public:
 	static void AddLockedFile(const FString& filePath, const FGitLfsLockInfo& lockInfo);
 	static void RemoveLockedFile(const FString& filePath);
 
+	/**
+	 * Keeps a tracked lockable file read-only unless the user holds its lock, so the editor asks to check it out before saving.
+	 * A file locked by someone else is protected on every status; a free file only the first time this session sees it,
+	 * so a file the user deliberately made writable stays writable.
+	 */
+	static void ProtectFromUnlockedSave(const FString& filePath, ELockState::Type lockState);
+
 private:
 	static void OnFileLockChanged(const FString& filePath, const FGitLfsLockInfo& lockInfo, bool locked);
-	// update local read/write state when our own lock statuses change
 	static TMap<FString, FGitLfsLockInfo> LockedFiles;
+	static TSet<FString> ProtectedFreeFiles;
+	static FCriticalSection ProtectedFreeFilesLock;
 };
 
 namespace GitSourceControlUtils
@@ -348,6 +358,10 @@ bool IsFileLFSLockable(const FString& InFile);
  * Gets Git attribute to see if these extensions are lockable
  */
 GITSOURCECONTROL_API bool CheckLFSLockable(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InFiles, TArray<FString>& OutErrorMessages);
+
+GITSOURCECONTROL_API bool CheckGitLfsAvailability(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutErrorMessage);
+
+GITSOURCECONTROL_API bool SyncUnlockHook(const FString& InPathToGitBinary, const FString& InRepositoryRoot, EGitUnlockMode InUnlockMode, FString& OutErrorMessage);
 
 GITSOURCECONTROL_API bool FetchRemote( const FString & InPathToGitBinary, const FString & InPathToRepositoryRoot, bool InUsingGitLfsLocking, TArray< FString > & OutResults, TArray< FString > & OutErrorMessages );
 

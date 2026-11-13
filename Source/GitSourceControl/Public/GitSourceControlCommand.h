@@ -126,6 +126,9 @@ public:
 	/** Potential error, warning and info message storage */
 	FGitSourceControlResultInfo ResultInfo;
 
+	/** Why the command failed, in the user's terms; replaces the generic failure dialog when the worker knows the cause */
+	FText UserFacingError;
+
 	/** Branch names for status queries */
 	TArray< FString > StatusBranchNames;
 };

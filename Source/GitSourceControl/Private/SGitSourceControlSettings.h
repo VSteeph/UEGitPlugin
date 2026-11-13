@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "GitSourceControlSettings.h"
 #include "Widgets/SCompoundWidget.h"
 #include "ISourceControlProvider.h"
 #include "Runtime/Launch/Resources/Version.h"
@@ -15,7 +16,7 @@ namespace ETextCommit { enum Type : int; }
 namespace ETextCommit { enum Type; }
 #endif
 
-enum class ECheckBoxState : uint8;
+namespace ESelectInfo { enum Type : int; }
 
 class SGitSourceControlSettings : public SCompoundWidget
 {
@@ -41,10 +42,15 @@ private:
 	FText GetUserName() const;
 	FText GetUserEmail() const;
 
-	void OnCheckedUseGitLfsLocking(ECheckBoxState NewCheckedState);
-	ECheckBoxState IsUsingGitLfsLocking() const;
-	bool GetIsUsingGitLfsLocking() const;
-
 	void OnLfsUserNameCommited(const FText& InText, ETextCommit::Type InCommitType);
 	FText GetLfsUserName() const;
+
+	TSharedRef<SWidget> OnGenerateUnlockModeWidget(TSharedPtr<EGitUnlockMode> InMode) const;
+	void OnUnlockModeChanged(TSharedPtr<EGitUnlockMode> InMode, ESelectInfo::Type InSelectInfo);
+	FText GetSelectedUnlockModeText() const;
+	static FText GetUnlockModeLabel(EGitUnlockMode InMode);
+	static FText GetUnlockModeTooltip(EGitUnlockMode InMode);
+
+	TArray<TSharedPtr<EGitUnlockMode>> UnlockModeOptions;
+	TSharedPtr<EGitUnlockMode> SelectedUnlockMode;
 };
