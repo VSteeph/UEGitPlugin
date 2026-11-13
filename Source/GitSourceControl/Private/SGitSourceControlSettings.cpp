@@ -233,20 +233,9 @@ void SGitSourceControlSettings::OnLfsUserNameCommited(const FText& InText, EText
 
 FText SGitSourceControlSettings::GetLfsUserName() const
 {
-	FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
-	const FString LFSUserName = GitSourceControl.AccessSettings().GetLfsUserName();
-	if (LFSUserName.IsEmpty())
-	{
-		const FText& UserName = GetUserName();
-		GitSourceControl.AccessSettings().SetLfsUserName(UserName.ToString());
-		GitSourceControl.AccessSettings().SaveSettings();
-		GitSourceControl.GetProvider().UpdateSettings();
-		return UserName;
-	}
-	else
-	{
-		return FText::FromString(LFSUserName);
-	}
+	// Shows the effective name (saved, else auto-detected, else Git user.name) without saving it: only a user commit writes the setting.
+	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
+	return FText::FromString(GitSourceControl.GetProvider().GetLockUser());
 }
 
 #undef LOCTEXT_NAMESPACE

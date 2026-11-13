@@ -8,15 +8,20 @@
 #include "GitSourceControlModule.h"
 #include "GitSourceControlProvider.h"
 #include "GitSourceControlOperations.h"
+#include "GitSourceControlRevertAndUnlock.h"
 #include "GitSourceControlUtils.h"
 
+#include "ContentBrowserMenuContexts.h"
 #include "ISourceControlModule.h"
 #include "ISourceControlOperation.h"
 #include "SourceControlOperations.h"
+#include "SourceControlWindows.h"
 
 #include "Widgets/Notifications/SNotificationList.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "Misc/MessageDialog.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "Styling/AppStyle.h"
 
 #include "PackageTools.h"
@@ -45,6 +50,13 @@ void FGitSourceControlMenu::Register()
 		FToolMenuSection& Section = SourceControlMenu->AddSection("GitSourceControlActions", LOCTEXT("GitSourceControlMenuHeadingActions", "Git"), FToolMenuInsert(NAME_None, EToolMenuInsertType::First));
 
 		AddMenuExtension(Section);
+
+		if (UToolMenu* SubMenu = ToolMenus->ExtendMenu("ContentBrowser.AssetContextMenu.SourceControlSubMenu"))
+		{
+			SubMenu->AddDynamicSection(
+				"GitSourceControlRevertActions",
+				FNewToolMenuDelegate::CreateStatic(&FGitSourceControlMenu::ExtendContentBrowserSourceControlSubMenu));
+		}
 	}
 }
 
@@ -56,7 +68,72 @@ void FGitSourceControlMenu::Unregister()
 	}
 }
 
-void FGitSourceControlMenu::RevertClicked()
+namespace
+{
+	bool HasLocalChangesOrDirtyPackage(const FString& PackageName, const FSourceControlStatePtr& State)
+	{
+		if (!State.IsValid() || !State->IsSourceControlled() || State->IsCheckedOutOther())
+		{
+			return false;
+		}
+		if (UPackage* Package = FindPackage(nullptr, *PackageName))
+		{
+			if (Package->IsDirty())
+			{
+				return true;
+			}
+		}
+		return State->IsModified() || State->IsAdded();
+	}
+
+	// The global actions only touch packages: config, plugin code and the project file are edited outside the lock workflow.
+	bool IsGlobalRevertCandidate(const FSourceControlStateRef& State, bool bUnlockAfterRevert)
+	{
+		if (!FPackageName::IsPackageExtension(*FPaths::GetExtension(State->GetFilename(), true)))
+		{
+			return false;
+		}
+		return bUnlockAfterRevert ? State->CanRevert() : (State->IsModified() || State->IsAdded());
+	}
+
+	bool ContainsMapPackage(const TArray<FString>& PackageNames)
+	{
+		for (const FString& PackageName : PackageNames)
+		{
+			if (UPackage* Package = FindPackage(nullptr, *PackageName))
+			{
+				if (Package->ContainsMap())
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+}
+
+void FGitSourceControlMenu::RevertChangesClicked()
+{
+	RevertClickedInternal(false);
+}
+
+void FGitSourceControlMenu::RevertAndUnlockClicked()
+{
+	RevertClickedInternal(true);
+}
+
+bool FGitSourceControlMenu::CanRevertClicked(bool bUnlockAfterRevert) const
+{
+	FGitSourceControlProvider& Provider = FGitSourceControlModule::Get().GetProvider();
+	TArray<FSourceControlStateRef> States = Provider.GetCachedStateByPredicate(
+		[bUnlockAfterRevert](const FSourceControlStateRef& State)
+		{
+			return IsGlobalRevertCandidate(State, bUnlockAfterRevert);
+		});
+	return States.Num() > 0;
+}
+
+void FGitSourceControlMenu::RevertClickedInternal(bool bUnlockAfterRevert)
 {
 	if (OperationInProgressNotification.IsValid())
 	{
@@ -66,8 +143,9 @@ void FGitSourceControlMenu::RevertClicked()
 		return;
 	}
 
-	// Ask the user before reverting all!
-	const FText DialogText(LOCTEXT("SourceControlMenu_Revert_Ask", "Revert all modifications of the working tree?"));
+	const FText DialogText = bUnlockAfterRevert
+		? LOCTEXT("SourceControlMenu_RevertAndUnlock_Ask", "Revert all modified assets and release their Git LFS locks?")
+		: LOCTEXT("SourceControlMenu_RevertChanges_Ask", "Revert all modified assets while keeping their Git LFS locks?");
 	const EAppReturnType::Type Choice = FMessageDialog::Open(EAppMsgType::OkCancel, DialogText);
 	if (Choice != EAppReturnType::Ok)
 	{
@@ -79,7 +157,6 @@ void FGitSourceControlMenu::RevertClicked()
 
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	FSourceControlOperationRef Operation = ISourceControlOperation::Create<FUpdateStatus>();
-	SourceControlProvider.Execute(Operation, FSourceControlChangelistPtr(), Filenames, EConcurrency::Asynchronous, FSourceControlOperationComplete::CreateStatic(&FGitSourceControlMenu::RevertAllCallback));
 
 	FNotificationInfo Info(LOCTEXT("SourceControlMenuRevertAll", "Checking for assets to revert..."));
 	Info.bFireAndForget = false;
@@ -100,70 +177,87 @@ void FGitSourceControlMenu::RevertClicked()
 	{
 		OperationInProgressNotification.Pin()->SetCompletionState(SNotificationItem::CS_Pending);
 	}
+
+	const ECommandResult::Type ExecuteResult = SourceControlProvider.Execute(
+		Operation,
+		FSourceControlChangelistPtr(),
+		Filenames,
+		EConcurrency::Asynchronous,
+		FSourceControlOperationComplete::CreateStatic(&FGitSourceControlMenu::RevertAllCallback, bUnlockAfterRevert));
+	if (ExecuteResult == ECommandResult::Failed)
+	{
+		RemoveInProgressNotification();
+		DisplayFailureNotification(bUnlockAfterRevert ? FName(TEXT("RevertAndUnlock")) : FName(TEXT("Revert")));
+	}
 }
 
-void FGitSourceControlMenu::RevertAllCallback(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult)
+void FGitSourceControlMenu::RevertAllCallback(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult, bool bUnlockAfterRevert)
 {
+	const FName OperationName = bUnlockAfterRevert ? FName(TEXT("RevertAndUnlock")) : FName(TEXT("Revert"));
 	if (InResult != ECommandResult::Succeeded)
 	{
+		RemoveInProgressNotification();
+		DisplayFailureNotification(OperationName);
 		return;
 	}
 
 	FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
 	FGitSourceControlProvider& Provider = GitSourceControl.GetProvider();
 
-	// Get a list of all the revertable packages
-	TArray<FString> PackageNames;
-	TArray<UPackage*> LoadedPackages;
-	TMap<FString, FSourceControlStatePtr> PackageStates;
-	FEditorFileUtils::FindAllSubmittablePackageFiles(PackageStates, true);
-
 	TArray<FSourceControlStateRef> RevertableStates = Provider.GetCachedStateByPredicate(
-		[](const FSourceControlStateRef& State) { return State->CanRevert(); });
+		[bUnlockAfterRevert](const FSourceControlStateRef& State)
+		{
+			return IsGlobalRevertCandidate(State, bUnlockAfterRevert);
+		});
+
+	TArray<FString> FileNames;
+	TArray<UPackage*> LoadedPackages;
+	FileNames.Reserve(RevertableStates.Num());
 	for (const FSourceControlStateRef& State : RevertableStates)
 	{
+		const FString& Filename = State->GetFilename();
+		FileNames.Add(Filename);
+
 		FString PackageName;
-		if (FPackageName::TryConvertFilenameToLongPackageName(State->GetFilename(), PackageName))
+		if (FPackageName::TryConvertFilenameToLongPackageName(Filename, PackageName))
 		{
-			PackageStates.FindOrAdd(PackageName, State);
-		}
-	}
-
-	for (TMap<FString, FSourceControlStatePtr>::TConstIterator PackageIter(PackageStates); PackageIter; ++PackageIter)
-	{
-		const FString PackageName = *PackageIter.Key();
-		const FSourceControlStatePtr CurPackageSCCState = PackageIter.Value();
-
-		UPackage* Package = FindPackage(nullptr, *PackageName);
-		if (Package != nullptr)
-		{
-			LoadedPackages.Add(Package);
-
-			if (!Package->IsFullyLoaded())
+			if (UPackage* Package = FindPackage(nullptr, *PackageName))
 			{
-				FlushAsyncLoading();
-				Package->FullyLoad();
-			}
-			ResetLoaders(Package);
-		}
+				LoadedPackages.Add(Package);
 
-		PackageNames.Add(PackageName);
+				if (!Package->IsFullyLoaded())
+				{
+					FlushAsyncLoading();
+					Package->FullyLoad();
+				}
+				ResetLoaders(Package);
+			}
+		}
 	}
 
-	const auto FileNames = SourceControlHelpers::PackageFilenames(PackageNames);
+	if (FileNames.IsEmpty())
+	{
+		RemoveInProgressNotification();
+		FNotificationInfo EmptyInfo(bUnlockAfterRevert
+			? LOCTEXT("SourceControlMenu_NothingToRevertAndUnlock", "No locked or modified assets to revert and unlock.")
+			: LOCTEXT("SourceControlMenu_NothingToRevert", "No modified or added assets to revert."));
+		FSlateNotificationManager::Get().AddNotification(EmptyInfo);
+		return;
+	}
 
-	// Launch a "Revert" Operation
-	const TSharedRef<FRevert, ESPMode::ThreadSafe> RevertOperation = ISourceControlOperation::Create<FRevert>();
-	const auto Result = Provider.Execute(RevertOperation, FSourceControlChangelistPtr(), FileNames);
+	FSourceControlOperationRef RevertOperation = bUnlockAfterRevert
+		? StaticCastSharedRef<ISourceControlOperation>(ISourceControlOperation::Create<FGitRevertAndUnlock>())
+		: StaticCastSharedRef<ISourceControlOperation>(ISourceControlOperation::Create<FRevert>());
+	const ECommandResult::Type Result = Provider.Execute(RevertOperation, FSourceControlChangelistPtr(), FileNames);
 
 	RemoveInProgressNotification();
 	if (Result != ECommandResult::Succeeded)
 	{
-		DisplayFailureNotification(TEXT("Revert"));
+		DisplayFailureNotification(OperationName);
 	}
 	else
 	{
-		DisplaySucessNotification(TEXT("Revert"));
+		DisplaySucessNotification(OperationName);
 	}
 
 	GitSourceControlUtils::ReloadPackages(LoadedPackages);
@@ -291,16 +385,146 @@ void FGitSourceControlMenu::OnSourceControlOperationComplete(const FSourceContro
 	}
 }
 
+void FGitSourceControlMenu::ExtendContentBrowserSourceControlSubMenu(UToolMenu* Menu)
+{
+	if (!Menu)
+	{
+		return;
+	}
+
+	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
+	if (SourceControlProvider.GetName() != FGitSourceControlModule::Get().GetProvider().GetName())
+	{
+		return;
+	}
+
+	const UContentBrowserAssetContextMenuContext* AssetContext = Menu->FindContext<UContentBrowserAssetContextMenuContext>();
+	if (!AssetContext || !AssetContext->bCanBeModified || AssetContext->SelectedAssets.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<FString> PackageNames;
+	PackageNames.Reserve(AssetContext->SelectedAssets.Num());
+	for (const FAssetData& AssetData : AssetContext->SelectedAssets)
+	{
+		if (!AssetData.PackageName.IsNone())
+		{
+			PackageNames.AddUnique(AssetData.PackageName.ToString());
+		}
+	}
+	if (PackageNames.IsEmpty())
+	{
+		return;
+	}
+
+	bool bCanRevertChanges = false;
+	bool bCanRevertAndUnlock = false;
+	for (const FString& PackageName : PackageNames)
+	{
+		const FSourceControlStatePtr State = SourceControlProvider.GetState(SourceControlHelpers::PackageFilename(PackageName), EStateCacheUsage::Use);
+		if (HasLocalChangesOrDirtyPackage(PackageName, State))
+		{
+			bCanRevertChanges = true;
+			bCanRevertAndUnlock = true;
+			break;
+		}
+		if (State.IsValid() && State->CanRevert())
+		{
+			bCanRevertAndUnlock = true;
+		}
+	}
+
+	// A dynamic section is built in a temporary menu, so the engine's own section cannot be edited here. ToolMenus merges
+	// sections by name and lets an extension's entry replace a same-name entry in place: reusing "SCCRevert" swaps the
+	// engine's Revert for Revert Changes at its position.
+	const FSlateIcon RevertIcon(FAppStyle::GetAppStyleSetName(), "SourceControl.Actions.Revert");
+	FToolMenuSection& Section = Menu->AddSection("AssetSourceControlActions");
+	Section.AddMenuEntry(
+		"SCCRevert",
+		LOCTEXT("GitRevertChanges", "Revert Changes"),
+		LOCTEXT("GitRevertChangesTooltip", "Reverts local changes to the selected assets while keeping your Git LFS locks."),
+		RevertIcon,
+		FUIAction(
+			FExecuteAction::CreateStatic(&FGitSourceControlMenu::ExecuteContentBrowserRevertChanges, PackageNames),
+			FCanExecuteAction::CreateLambda([bCanRevertChanges]() { return bCanRevertChanges; })
+		));
+
+	FToolMenuEntry& UnlockEntry = Section.AddMenuEntry(
+		"GitRevertAndUnlock",
+		LOCTEXT("GitRevertAndUnlock", "Revert and Unlock"),
+		LOCTEXT("GitRevertAndUnlockTooltip", "Reverts local changes to the selected assets and releases your Git LFS locks."),
+		RevertIcon,
+		FUIAction(
+			FExecuteAction::CreateStatic(&FGitSourceControlMenu::ExecuteContentBrowserRevertAndUnlock, PackageNames),
+			FCanExecuteAction::CreateLambda([bCanRevertAndUnlock]() { return bCanRevertAndUnlock; })
+		));
+	UnlockEntry.InsertPosition = FToolMenuInsert("SCCRevert", EToolMenuInsertType::After);
+}
+
+void FGitSourceControlMenu::ExecuteContentBrowserRevertChanges(TArray<FString> PackageNames)
+{
+	const bool bReloadWorld = ContainsMapPackage(PackageNames);
+	FSourceControlWindows::PromptForRevert(PackageNames, bReloadWorld);
+}
+
+void FGitSourceControlMenu::ExecuteContentBrowserRevertAndUnlock(TArray<FString> PackageNames)
+{
+	ISourceControlProvider& Provider = ISourceControlModule::Get().GetProvider();
+	bool bHasChanges = false;
+	for (const FString& PackageName : PackageNames)
+	{
+		const FSourceControlStatePtr State = Provider.GetState(SourceControlHelpers::PackageFilename(PackageName), EStateCacheUsage::Use);
+		if (HasLocalChangesOrDirtyPackage(PackageName, State))
+		{
+			bHasChanges = true;
+			break;
+		}
+	}
+
+	if (bHasChanges)
+	{
+		const FText ConfirmText = LOCTEXT("GitRevertAndUnlock_Confirm", "Discard local changes and release Git LFS locks for the selected assets?");
+		if (FMessageDialog::Open(EAppMsgType::YesNo, ConfirmText) != EAppReturnType::Yes)
+		{
+			return;
+		}
+	}
+
+	const bool bReloadWorld = ContainsMapPackage(PackageNames);
+	USourceControlHelpers::ApplyOperationAndReloadPackages(
+		PackageNames,
+		[](const TArray<FString>& InFilenames)
+		{
+			return ISourceControlModule::Get().GetProvider().Execute(
+				ISourceControlOperation::Create<FGitRevertAndUnlock>(),
+				InFilenames) == ECommandResult::Succeeded;
+		},
+		bReloadWorld,
+		true);
+}
+
 void FGitSourceControlMenu::AddMenuExtension(FToolMenuSection& Builder)
 {
 	Builder.AddMenuEntry(
-		"GitRevert",
-		LOCTEXT("GitRevert",			"Revert"),
-		LOCTEXT("GitRevertTooltip",		"Revert all files in the repository to their unchanged state."),
+		"GitRevertAllAssets",
+		LOCTEXT("GitRevertAllAssets",			"Revert All Assets"),
+		LOCTEXT("GitRevertAllAssetsTooltip",	"Discard local modifications of every asset (.uasset, .umap) while keeping your Git LFS locks. Config, code and project files are not touched."),
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "SourceControl.Actions.Revert"),
 		FUIAction(
-			FExecuteAction::CreateRaw(this, &FGitSourceControlMenu::RevertClicked),
-			FCanExecuteAction()
+			FExecuteAction::CreateRaw(this, &FGitSourceControlMenu::RevertChangesClicked),
+			FCanExecuteAction::CreateRaw(this, &FGitSourceControlMenu::CanRevertClicked, false)
+		)
+	);
+
+	Builder.AddMenuEntry(
+		"GitRevertAndUnlockAllAssets",
+		LOCTEXT("GitRevertAndUnlockAllAssets",			"Revert and Unlock All Assets"),
+		LOCTEXT("GitRevertAndUnlockAllAssetsTooltip",	"Discard local modifications of every asset (.uasset, .umap) and release your Git LFS locks. Config, code and project files are not touched."),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "SourceControl.Actions.Revert"),
+		FUIAction(
+			FExecuteAction::CreateRaw(this, &FGitSourceControlMenu::RevertAndUnlockClicked),
+			FCanExecuteAction::CreateRaw(this, &FGitSourceControlMenu::CanRevertClicked, true)
 		)
 	);
 

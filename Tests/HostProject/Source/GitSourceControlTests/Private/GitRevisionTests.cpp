@@ -66,8 +66,9 @@ bool FShould_ReturnEachAssetRevision_When_PathsShareTheSameFilename::RunTest(con
 
 	TestTrue(TEXT("First revision was retrieved"), bFirstRetrieved && bFirstLoaded);
 	TestTrue(TEXT("Second revision was retrieved"), bSecondRetrieved && bSecondLoaded);
-	TestEqual(TEXT("First asset content"), FirstContent, FString(TEXT("First revision fixture\n")));
-	TestEqual(TEXT("Second asset content"), SecondContent, FString(TEXT("Second revision fixture\n")));
+	// Fixtures are copied from a checkout whose line endings depend on the machine's core.autocrlf.
+	TestEqual(TEXT("First asset content"), FirstContent.TrimEnd(), FString(TEXT("First revision fixture")));
+	TestEqual(TEXT("Second asset content"), SecondContent.TrimEnd(), FString(TEXT("Second revision fixture")));
 	return !HasAnyErrors();
 }
 

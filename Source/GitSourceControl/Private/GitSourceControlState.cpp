@@ -4,6 +4,7 @@
 // or copy at http://opensource.org/licenses/MIT)
 
 #include "GitSourceControlState.h"
+#include "GitSourceControlStyle.h"
 
 #include "Textures/SlateIcon.h"
 #if ENGINE_MINOR_VERSION >= 2
@@ -81,37 +82,27 @@ ISourceControlState::FResolveInfo FGitSourceControlState::GetResolveInfo() const
 
 // @todo add Slate icons for git specific states (NotAtHead vs Conflicted...)
 
-#if ENGINE_MINOR_VERSION >= 2
-#define GET_ICON_RETURN( NAME ) FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl." #NAME )
-#else
-#define GET_ICON_RETURN( NAME ) FSlateIcon(FAppStyle::GetAppStyleSetName(), "Perforce." #NAME )
-#endif
 FSlateIcon FGitSourceControlState::GetIcon() const
 {
-	switch (GetGitState())
+	const FName StyleSetName = FGitSourceControlStyle::GetStyleSetName();
+	const bool bOutdated = State.RemoteState == ERemoteState::NotAtHead || State.RemoteState == ERemoteState::NotLatest;
+
+	FName LockBrushName;
+	if (State.LockState == ELockState::LockedOther)
 	{
-	case EGitState::NotAtHead:
-		return GET_ICON_RETURN(NotAtHeadRevision);
-	case EGitState::LockedOther:
-		return GET_ICON_RETURN(CheckedOutByOtherUser);
-	case EGitState::NotLatest:
-		return GET_ICON_RETURN(ModifiedOtherBranch);
-	case EGitState::Unmerged:
-		return GET_ICON_RETURN(Branched);
-	case EGitState::Added:
-		return GET_ICON_RETURN(OpenForAdd);
-	case EGitState::Untracked:
-		return GET_ICON_RETURN(NotInDepot);
-	case EGitState::Deleted:
-		return GET_ICON_RETURN(MarkedForDelete);
-	case EGitState::Modified:
-	case EGitState::CheckedOut:
-		return GET_ICON_RETURN(CheckedOut);
-	case EGitState::Ignored:
-		return GET_ICON_RETURN(NotInDepot);
-	default:
-	  return FSlateIcon();
+		LockBrushName = FGitSourceControlStyle::LockOtherBrushName;
 	}
+	else if (State.LockState == ELockState::Locked)
+	{
+		LockBrushName = FGitSourceControlStyle::LockSelfBrushName;
+	}
+
+	if (LockBrushName.IsNone())
+	{
+		return bOutdated ? FSlateIcon(StyleSetName, FGitSourceControlStyle::OutdatedBrushName) : FSlateIcon();
+	}
+	// The asset view has a single icon slot: the outdated state stacks on the lock as an overlay badge.
+	return FSlateIcon(StyleSetName, LockBrushName, NAME_None, bOutdated ? FGitSourceControlStyle::OutdatedBadgeBrushName : NAME_None);
 }
 
 FText FGitSourceControlState::GetDisplayName() const
@@ -146,36 +137,100 @@ FText FGitSourceControlState::GetDisplayName() const
 	}
 }
 
+namespace
+{
+	FText FormatLockTooltip(const FString& InLockUser, const FDateTime& InLockDate)
+	{
+		const bool bHasUser = !InLockUser.IsEmpty();
+		const bool bHasDate = (InLockDate.GetTicks() > 0);
+		if (bHasUser && bHasDate)
+		{
+			return FText::Format(
+				LOCTEXT("LockedByAt_Tooltip", "Locked by: {0} ({1})"),
+				FText::FromString(InLockUser),
+				FText::AsDateTime(InLockDate, EDateTimeStyle::Short, EDateTimeStyle::Short));
+		}
+		if (bHasUser)
+		{
+			return FText::Format(LOCTEXT("LockedBy_Tooltip", "Locked by: {0}"), FText::FromString(InLockUser));
+		}
+		if (bHasDate)
+		{
+			return FText::Format(
+				LOCTEXT("LockedAt_Tooltip", "Locked ({0})"),
+				FText::AsDateTime(InLockDate, EDateTimeStyle::Short, EDateTimeStyle::Short));
+		}
+		return FText::GetEmpty();
+	}
+}
+
 FText FGitSourceControlState::GetDisplayTooltip() const
 {
-	switch (GetGitState())
+	// One line per fact a designer acts on: a newer version elsewhere, who holds the lock, then the local file state.
+	TArray<FText> Lines;
+	if (State.RemoteState == ERemoteState::NotAtHead)
 	{
-	case EGitState::NotAtHead:
-		return LOCTEXT("NotCurrent_Tooltip", "The file(s) are not at the head revision");
-	case EGitState::LockedOther:
-		return FText::Format(LOCTEXT("CheckedOutOther_Tooltip", "Checked out by: {0}"), FText::FromString(State.LockUser));
-	case EGitState::NotLatest:
-		return FText::Format(LOCTEXT("ModifiedOtherBranch_Tooltip", "Modified in branch: {0} CL:{1} ({2})"), FText::FromString(State.HeadBranch), FText::FromString(HeadCommit), FText::FromString(HeadAction));
-	case EGitState::Unmerged:
-		return LOCTEXT("ContentsConflict_Tooltip", "The contents of the item conflict with updates received from the repository.");
-	case EGitState::Added:
-		return LOCTEXT("OpenedForAdd_Tooltip", "The file(s) are opened for add");
-	case EGitState::Untracked:
-		return LOCTEXT("NotControlled_Tooltip", "Item is not under revision control.");
-	case EGitState::Deleted:
-		return LOCTEXT("MarkedForDelete_Tooltip", "The file(s) are marked for delete");
-	case EGitState::Modified:
-	case EGitState::CheckedOut:
-		return LOCTEXT("CheckedOut_Tooltip", "The file(s) are checked out");
-	case EGitState::Ignored:
-		return LOCTEXT("Ignored_Tooltip", "Item is being ignored.");
-	case EGitState::Lockable:
-		return LOCTEXT("ReadOnly_Tooltip", "The file(s) are marked locally as read-only");
-	case EGitState::None:
-		return LOCTEXT("Unknown_Tooltip", "Unknown revision control state");
-	default:
-		return FText();
+		Lines.Add(FText::Format(LOCTEXT("NotAtHead_Tooltip", "Newer version on your remote branch: {0}"), FText::FromString(State.HeadBranch)));
 	}
+	else if (State.RemoteState == ERemoteState::NotLatest)
+	{
+		Lines.Add(FText::Format(LOCTEXT("ModifiedOtherBranch_Tooltip", "Modified in branch: {0}"), FText::FromString(State.HeadBranch)));
+	}
+
+	if (State.LockState == ELockState::Locked || State.LockState == ELockState::LockedOther)
+	{
+		const FText LockTooltip = FormatLockTooltip(State.LockUser, State.LockDate);
+		if (!LockTooltip.IsEmpty())
+		{
+			Lines.Add(LockTooltip);
+		}
+		else if (State.LockState == ELockState::LockedOther)
+		{
+			Lines.Add(LOCTEXT("CheckedOutOtherFallback_Tooltip", "Locked by another user"));
+		}
+	}
+
+	switch (State.FileState)
+	{
+	case EFileState::Unmerged:
+		Lines.Add(LOCTEXT("ContentsConflict_Tooltip", "The contents of the item conflict with updates received from the repository."));
+		break;
+	case EFileState::Added:
+		Lines.Add(LOCTEXT("OpenedForAdd_Tooltip", "The file(s) are opened for add"));
+		break;
+	case EFileState::Deleted:
+		Lines.Add(LOCTEXT("MarkedForDelete_Tooltip", "The file(s) are marked for delete"));
+		break;
+	case EFileState::Modified:
+		Lines.Add(LOCTEXT("Modified_Tooltip", "The file(s) are modified"));
+		break;
+	default:
+		if (State.TreeState == ETreeState::Untracked)
+		{
+			Lines.Add(LOCTEXT("NotControlled_Tooltip", "Item is not under revision control."));
+		}
+		else if (State.TreeState == ETreeState::Ignored)
+		{
+			Lines.Add(LOCTEXT("Ignored_Tooltip", "Item is being ignored."));
+		}
+		break;
+	}
+
+	if (Lines.IsEmpty())
+	{
+		switch (GetGitState())
+		{
+		case EGitState::CheckedOut:
+			return LOCTEXT("CheckedOut_Tooltip", "The file(s) are checked out");
+		case EGitState::Lockable:
+			return LOCTEXT("ReadOnly_Tooltip", "The file(s) are marked locally as read-only");
+		case EGitState::None:
+			return LOCTEXT("Unknown_Tooltip", "Unknown revision control state");
+		default:
+			return FText::GetEmpty();
+		}
+	}
+	return FText::Join(INVTEXT("\n"), Lines);
 }
 
 const FString& FGitSourceControlState::GetFilename() const
@@ -333,11 +388,12 @@ bool FGitSourceControlState::CanRevert() const
 		return true;
 	}
 
-	if (!IsCurrent() || IsConflicted())
+	if (IsConflicted())
 	{
 		return false;
 	}
 
+	// An outdated lock is precisely one to release before updating, so being behind the remote does not block it.
 	return State.LockState == ELockState::Locked;
 }
 

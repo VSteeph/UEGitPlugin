@@ -82,7 +82,7 @@ public:
 	TMap<const FString, FGitState> States;
 };
 
-/** Revert any change to a file to its state on the local depot. */
+/** Revert local changes to a file without releasing Git LFS locks. */
 class FGitRevertWorker : public IGitSourceControlWorker
 {
 public:
@@ -94,6 +94,20 @@ public:
 
 	/** Temporary states for results */
 	TMap<const FString, FGitState> States;
+
+protected:
+	/** Whether to release Git LFS locks after reverting changes. */
+	virtual bool ShouldUnlock() const { return false; }
+};
+
+/** Revert any changes to a file and release its Git LFS lock. */
+class FGitRevertAndUnlockWorker final : public FGitRevertWorker
+{
+public:
+	virtual FName GetName() const override;
+
+protected:
+	virtual bool ShouldUnlock() const override { return true; }
 };
 
 /** Get revision control status of files on local working copy. */

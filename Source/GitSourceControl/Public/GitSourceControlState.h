@@ -119,6 +119,8 @@ struct FGitState
 	ELockState::Type LockState = ELockState::Unknown;
 	/** Name of user who has locked the file */
 	FString LockUser;
+	/** UTC timestamp when the file lock was created */
+	FDateTime LockDate;
 	ERemoteState::Type RemoteState = ERemoteState::UpToDate;
 	/** The branch with the latest commit for this file */
 	FString HeadBranch;

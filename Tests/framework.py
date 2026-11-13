@@ -1,7 +1,11 @@
 """Prepare an isolated Unreal host, or explicitly build/open/run it later.
 
-Python 3.10+ and Git are required. Unreal 5.6 and 5.8 are supported targets.
-No command runs automatically and this scaffold contains no test cases.
+Python 3.10+, Git and Git LFS are required. Unreal 5.6 and 5.8 are supported targets.
+No command runs automatically.
+
+Suites: unit, integration and e2e ("all" runs each in its own editor session).
+`run` serves an in-memory Git LFS lock server (lfs_lock_server.py) for the whole session.
+The e2e suite drives the editor like a user and runs attended, so its dialogs reach the tests.
 
 Create a workspace outside any existing Git repository:
   python Tests/framework.py prepare --engine ENGINE_ROOT --output-root SCRATCH_ROOT
@@ -26,6 +30,8 @@ import shutil
 import subprocess
 import sys
 import uuid
+
+from lfs_lock_server import LfsLockServer
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -205,7 +211,17 @@ def use_workspace(action: str, workspace_path: Path, suite: str, timeout: int, r
         return
 
     suites = read_json(workspace / "suites.json")
-    automation_filter = suites[suite]
+    # "all" runs every suite in its own editor session, since E2E needs an attended editor and the others must not.
+    selected = [name for name in suites if name != "all"] if suite == "all" else [suite]
+    with LfsLockServer() as lock_server:
+        execute([shutil.which("git") or "git", "-C", str(project.parent), "config", "--local", "lfs.url", lock_server.url],
+                workspace)
+        for name in selected:
+            run_suite(workspace, command_editor, common, name, suites[name], timeout, render)
+
+
+def run_suite(workspace: Path, command_editor: Path, common: list[str], name: str, automation_filter: str,
+              timeout: int, render: bool) -> None:
     if not isinstance(automation_filter, str) or not all(
         part.isidentifier() for part in automation_filter.split(".")
     ) or automation_filter.split(".")[0] != "UEGitPlugin":
@@ -213,16 +229,18 @@ def use_workspace(action: str, workspace_path: Path, suite: str, timeout: int, r
     report = workspace / "Reports" / uuid.uuid4().hex
     report.mkdir(parents=True)
     rendering = ["-RenderOffscreen"] if render else ["-NullRHI"]
-    execute([str(command_editor), *common, *rendering, "-Unattended", "-NoPause", "-StdOut",
+    # E2E drives the editor like a user: dialogs must reach the tests' responder instead of auto-cancelling.
+    attendance = [] if name == "e2e" else ["-Unattended"]
+    execute([str(command_editor), *common, *rendering, *attendance, "-NoPause", "-StdOut",
              f"-abslog={report / 'Automation.log'}", f"-ReportExportPath={report}",
              f"-ExecCmds=Automation RunTests {automation_filter};Quit",
              "-TestExit=Automation Test Queue Empty"], workspace, timeout)
     result = read_json(report / "index.json")
     if result.get("failed", 0) or result.get("notRun", 0) or result.get("inProcess", 0):
-        raise ValueError(f"Automation reported failed or incomplete tests; see {report}.")
+        raise ValueError(f"Automation reported failed or incomplete tests in suite '{name}'; see {report}.")
     if result.get("succeeded", 0) + result.get("succeededWithWarnings", 0) == 0:
-        raise ValueError(f"No tests executed: this framework is intentionally empty; see {report}.")
-    print(f"Report: {report}")
+        raise ValueError(f"No tests executed in suite '{name}'; see {report}.")
+    print(f"Report ({name}): {report}")
 
 
 def positive_seconds(value: str) -> int:

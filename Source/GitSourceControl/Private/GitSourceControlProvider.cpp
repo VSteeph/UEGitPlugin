@@ -85,7 +85,40 @@ void FGitSourceControlProvider::UpdateSettings()
 {
 	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
 	bUsingGitLfsLocking = GitSourceControl.AccessSettings().IsUsingGitLfsLocking();
-	LockUser = GitSourceControl.AccessSettings().GetLfsUserName();
+
+	FString ConfiguredLockUser = GitSourceControl.AccessSettings().GetLfsUserName();
+	// Runs on the connection thread as well as the game thread, where the detected name is applied.
+	FScopeLock Lock(&LockUserCriticalSection);
+	if (ConfiguredLockUser.IsEmpty())
+	{
+		ConfiguredLockUser = !AutoDetectedLockUser.IsEmpty() ? AutoDetectedLockUser : UserName;
+	}
+	LockUser = MoveTemp(ConfiguredLockUser);
+}
+
+void FGitSourceControlProvider::QueueAutoDetectedLockUser(const FString& InDetectedUser)
+{
+	if (InDetectedUser.IsEmpty())
+	{
+		return;
+	}
+	FScopeLock Lock(&LockUserCriticalSection);
+	PendingAutoDetectedLockUser = InDetectedUser;
+}
+
+void FGitSourceControlProvider::ApplyAutoDetectedLockUser(const FString& InDetectedUser)
+{
+	if (InDetectedUser.IsEmpty())
+	{
+		return;
+	}
+
+	// Only the runtime fallback changes: the saved LFS username is written by the user alone.
+	{
+		FScopeLock Lock(&LockUserCriticalSection);
+		AutoDetectedLockUser = InDetectedUser;
+	}
+	UpdateSettings();
 }
 
 void FGitSourceControlProvider::CheckRepositoryStatus()
@@ -130,6 +163,7 @@ void FGitSourceControlProvider::CheckRepositoryStatus()
 
 		// Get user name & email (of the repository, else from the global Git config)
 		GitSourceControlUtils::GetUserConfig(PathToGitBinary, PathToRepositoryRoot, UserName, UserEmail);
+		UpdateSettings();
 		
 		TMap<FString, FGitSourceControlState> States;
 		auto ConditionalRepoInit = [this, &States]()
@@ -252,6 +286,12 @@ void FGitSourceControlProvider::Close()
 	bGitRepositoryFound = false;
 	UserName.Empty();
 	UserEmail.Empty();
+	{
+		FScopeLock Lock(&LockUserCriticalSection);
+		AutoDetectedLockUser.Empty();
+		LockUser.Empty();
+		PendingAutoDetectedLockUser.Empty();
+	}
 	if (Runner)
 	{
 		delete Runner;
@@ -611,6 +651,22 @@ void FGitSourceControlProvider::UpdateRepositoryStatus(const class FGitSourceCon
 
 void FGitSourceControlProvider::Tick()
 {
+	{
+		FString PendingUser;
+		{
+			FScopeLock Lock(&LockUserCriticalSection);
+			if (!PendingAutoDetectedLockUser.IsEmpty())
+			{
+				PendingUser = MoveTemp(PendingAutoDetectedLockUser);
+				PendingAutoDetectedLockUser.Empty();
+			}
+		}
+		if (!PendingUser.IsEmpty())
+		{
+			ApplyAutoDetectedLockUser(PendingUser);
+		}
+	}
+
 	bool bStatesUpdated = TicksUntilNextForcedUpdate == 1;
 	if( TicksUntilNextForcedUpdate > 0 )
 	{
