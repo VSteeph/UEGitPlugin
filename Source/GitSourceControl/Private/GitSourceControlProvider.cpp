@@ -96,6 +96,30 @@ void FGitSourceControlProvider::UpdateSettings()
 	LockUser = MoveTemp(ConfiguredLockUser);
 }
 
+void FGitSourceControlProvider::SyncUnlockHook() const
+{
+	if (PathToGitBinary.IsEmpty() || PathToRepositoryRoot.IsEmpty())
+	{
+		return;
+	}
+	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
+	const EGitUnlockMode UnlockMode = GitSourceControl.AccessSettings().GetUnlockMode();
+	// Git only runs the reference-transaction hook since 2.28: older versions silently never auto-unlock.
+	const bool bGitSupportsHook = GitVersion.Major > 2 || (GitVersion.Major == 2 && GitVersion.Minor >= 28);
+	if (UnlockMode != EGitUnlockMode::None && !bGitSupportsHook)
+	{
+		FTSMessageLog("SourceControl").Warning(FText::FromString(FString::Printf(
+			TEXT("Automatic unlock requires Git 2.28 or newer (found %d.%d.%d): locks will not be released automatically."),
+			GitVersion.Major, GitVersion.Minor, GitVersion.Patch)));
+	}
+	FString HookError;
+	if (!GitSourceControlUtils::SyncUnlockHook(PathToGitBinary, PathToRepositoryRoot, UnlockMode, HookError)
+		&& !HookError.IsEmpty())
+	{
+		FTSMessageLog("SourceControl").Warning(FText::FromString(HookError));
+	}
+}
+
 void FGitSourceControlProvider::QueueAutoDetectedLockUser(const FString& InDetectedUser)
 {
 	if (InDetectedUser.IsEmpty())
@@ -195,6 +219,11 @@ void FGitSourceControlProvider::CheckRepositoryStatus()
 				{
 					UE_LOG(LogSourceControl, Log, TEXT("Git LFS Locking is enabled."));
 				}
+			}
+
+			if (bUsingGitLfsLocking)
+			{
+				SyncUnlockHook();
 			}
 
 			const TArray<FString> ProjectDirs = GitSourceControlUtils::GetSourceControlledAssetPaths();
@@ -806,7 +835,8 @@ ECommandResult::Type FGitSourceControlProvider::ExecuteSynchronousCommand(FGitSo
 		}
 		else if (!bSuppressResponseMsg)
 		{
-			FMessageDialog::Open( EAppMsgType::Ok, LOCTEXT("Git_ServerUnresponsive", "Git command failed. Please check your connection and try again, or check the output log for more information.") );
+			const FText GenericError = LOCTEXT("Git_ServerUnresponsive", "Git command failed. Please check your connection and try again, or check the output log for more information.");
+			FMessageDialog::Open( EAppMsgType::Ok, InCommand.UserFacingError.IsEmpty() ? GenericError : InCommand.UserFacingError );
 			UE_LOG(LogSourceControl, Error, TEXT("Command '%s' Failed!"), *InCommand.Operation->GetName().ToString());
 		}
 	}

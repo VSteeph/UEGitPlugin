@@ -14,6 +14,7 @@ public class GitSourceControlTests : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"GitSourceControl",
+			"InputCore",
 			"Projects",
 			"Slate",
 			"SlateCore",

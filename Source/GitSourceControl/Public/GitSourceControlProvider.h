@@ -103,6 +103,9 @@ public:
 	/** Refresh Git settings from revision control settings */
 	void UpdateSettings();
 
+	/** Install, update or remove the managed Git reference-transaction unlock hook according to UnlockMode */
+	void SyncUnlockHook() const;
+
 	/**
 	 * Find the .git/ repository and check its status.
 	 */

@@ -58,6 +58,17 @@ bool FGitConnectWorker::Execute(FGitSourceControlCommand& InCommand)
 		return false;
 	}
 
+	// Git LFS is required by the lock manager and the auto-unlock hook.
+	FString LfsError;
+	if (!GitSourceControlUtils::CheckGitLfsAvailability(InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, LfsError))
+	{
+		const FText LfsMissing = FText::FromString(LfsError);
+		InCommand.ResultInfo.ErrorMessages.Add(LfsError);
+		Operation->SetErrorText(LfsMissing);
+		InCommand.bCommandSuccessful = false;
+		return false;
+	}
+
 	// Get default branch: git remote show
 	
 	TArray<FString> Parameters {
@@ -229,8 +240,50 @@ bool FGitCheckOutWorker::Execute(FGitSourceControlCommand& InCommand)
 			}
 		}
 	}
+	else
+	{
+		ReportLocksTakenByOthers(InCommand, LockableAbsoluteFiles, FallbackLockUser);
+	}
 
 	return InCommand.bCommandSuccessful;
+}
+
+void FGitCheckOutWorker::ReportLocksTakenByOthers(FGitSourceControlCommand& InCommand, const TArray<FString>& InLockableFiles, const FString& InLockUser)
+{
+	TMap<FString, FGitLfsLockInfo> ServerLocks;
+	TArray<FString> LockErrors;
+	if (!GitSourceControlUtils::GetAllLocks(InCommand.PathToRepositoryRoot, InCommand.PathToGitBinary, LockErrors, ServerLocks, true))
+	{
+		return;
+	}
+
+	TArray<FText> Reasons;
+	for (FString File : InLockableFiles)
+	{
+		FPaths::NormalizeFilename(File);
+		const FGitLfsLockInfo* Lock = ServerLocks.Find(File);
+		if (!Lock || Lock->IsOwnedBy(InLockUser))
+		{
+			continue;
+		}
+		const FText Reason = FText::Format(LOCTEXT("CheckOutLockedByOther", "Cannot check out '{0}': locked by {1} since {2}."),
+			FText::FromString(FPaths::GetBaseFilename(File)), FText::FromString(Lock->LockUser), FText::AsDateTime(Lock->LockedAt, EDateTimeStyle::Short, EDateTimeStyle::Short));
+		Reasons.Add(Reason);
+		InCommand.ResultInfo.ErrorMessages.Add(Reason.ToString());
+
+		FGitState LockedByOther;
+		LockedByOther.FileState = EFileState::Unset;
+		LockedByOther.TreeState = ETreeState::Unset;
+		LockedByOther.LockState = ELockState::LockedOther;
+		LockedByOther.LockUser = Lock->LockUser;
+		LockedByOther.LockDate = Lock->LockedAt;
+		LockedByOther.RemoteState = ERemoteState::Unset;
+		States.Add(File, LockedByOther);
+	}
+	if (Reasons.Num() > 0)
+	{
+		InCommand.UserFacingError = FText::Join(FText::FromString(TEXT("\n")), Reasons);
+	}
 }
 
 bool FGitCheckOutWorker::UpdateStates() const

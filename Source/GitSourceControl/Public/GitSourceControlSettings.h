@@ -8,6 +8,14 @@
 #include "Containers/UnrealString.h"
 #include "HAL/CriticalSection.h"
 
+/** Policy for automatic Git LFS lock release via the reference-transaction hook. */
+enum class EGitUnlockMode : uint8
+{
+	OnMerge,
+	OnPush,
+	None
+};
+
 class GITSOURCECONTROL_API FGitSourceControlSettings
 {
 public:
@@ -29,6 +37,18 @@ public:
 	/** Set the username used by the Git LFS 2 File Locks server */
 	bool SetLfsUserName(const FString& InString);
 
+	/** Get the automatic Git LFS unlock mode */
+	EGitUnlockMode GetUnlockMode() const;
+
+	/** Set the automatic Git LFS unlock mode */
+	bool SetUnlockMode(EGitUnlockMode InUnlockMode);
+
+	/** Convert an unlock mode enum value to its persistent string representation */
+	static FString UnlockModeToString(EGitUnlockMode InUnlockMode);
+
+	/** Parse an unlock mode string; defaults to OnMerge if unrecognized */
+	static bool ParseUnlockMode(const FString& InString, EGitUnlockMode& OutUnlockMode);
+
 	/** Load settings from ini file */
 	void LoadSettings();
 
@@ -47,4 +67,7 @@ private:
 
 	/** Username used by the Git LFS 2 File Locks server */
 	FString LfsUserName;
+
+	/** Automatic Git LFS unlock mode */
+	EGitUnlockMode UnlockMode = EGitUnlockMode::OnMerge;
 };

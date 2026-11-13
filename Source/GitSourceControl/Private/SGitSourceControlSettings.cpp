@@ -12,6 +12,7 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SFilePathPicker.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "EditorDirectories.h"
@@ -53,7 +54,23 @@ void SGitSourceControlSettings::ConstructBasedOnEngineVersion( )
 	#define TT_RepoRoot LOCTEXT("RepositoryRootLabel_Tooltip", "Path to the root of the Git repository")
 	#define TT_UserName LOCTEXT("UserNameLabel_Tooltip", "Git Username fetched from local config")
 	#define TT_Email LOCTEXT("GitUserEmail_Tooltip", "Git E-mail fetched from local config")
-	#define TT_LFS LOCTEXT("UseGitLfsLocking_Tooltip", "Uses Git LFS 2 File Locking workflow.")
+	#define TT_LFS LOCTEXT("LfsUserName_Tooltip", "Git LFS username used to identify your locks (auto-detected when possible)")
+	#define TT_UnlockMode LOCTEXT("UnlockMode_Tooltip", "Automatic Git LFS unlock policy via the repository reference-transaction hook")
+
+	UnlockModeOptions.Reset();
+	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::OnMerge));
+	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::OnPush));
+	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::None));
+	const EGitUnlockMode CurrentUnlockMode = FGitSourceControlModule::Get().AccessSettings().GetUnlockMode();
+	SelectedUnlockMode = UnlockModeOptions[0];
+	for (const TSharedPtr<EGitUnlockMode>& Option : UnlockModeOptions)
+	{
+		if (Option.IsValid() && *Option == CurrentUnlockMode)
+		{
+			SelectedUnlockMode = Option;
+			break;
+		}
+	}
 
 	ChildSlot
 	[
@@ -132,30 +149,48 @@ void SGitSourceControlSettings::ConstructBasedOnEngineVersion( )
 				.ToolTipText( TT_Email )
 			]
 		]
-		// LFS Config
+		// LFS Username
 		+SVerticalBox::Slot()
 		.AutoHeight()
 		[
 			SNew(SHorizontalBox)
 			ROW_LEFT( 10.0f )
 			[
-				SNew(SCheckBox)
-				.IsChecked(Self::IsUsingGitLfsLocking())
-				.OnCheckStateChanged(this, &Self::OnCheckedUseGitLfsLocking)
-				.Content()
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("UseGitLfsLocking", "Uses Git LFS"))
-					.ToolTipText( TT_LFS )
-				]
+				SNew(STextBlock)
+				.Text(LOCTEXT("LfsUserNameLabel", "LFS Username"))
+				.ToolTipText( TT_LFS )
 			]
 			ROW_RIGHT( 10.0f )
 			[
 				SNew(SEditableTextBox)
 				.Text(this, &Self::GetLfsUserName)
 				.OnTextCommitted(this, &Self::OnLfsUserNameCommited)
-				.IsEnabled(this, &Self::GetIsUsingGitLfsLocking)
 				.HintText(LOCTEXT("LfsUserName_Hint", "Username to lock files on the LFS server"))
+			]
+		]
+		// Unlock Mode
+		+SVerticalBox::Slot()
+		.AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			ROW_LEFT( 10.0f )
+			[
+				SNew(STextBlock)
+				.Text(LOCTEXT("UnlockModeLabel", "Unlock Mode"))
+				.ToolTipText( TT_UnlockMode )
+			]
+			ROW_RIGHT( 10.0f )
+			[
+				SNew(SComboBox<TSharedPtr<EGitUnlockMode>>)
+				.OptionsSource(&UnlockModeOptions)
+				.InitiallySelectedItem(SelectedUnlockMode)
+				.OnGenerateWidget(this, &Self::OnGenerateUnlockModeWidget)
+				.OnSelectionChanged(this, &Self::OnUnlockModeChanged)
+				.ToolTipText( TT_UnlockMode )
+				[
+					SNew(STextBlock)
+					.Text(this, &Self::GetSelectedUnlockModeText)
+				]
 			]
 		]
 	];
@@ -204,25 +239,6 @@ FText SGitSourceControlSettings::GetUserEmail() const
 	return FText::FromString(UserEmail);
 }
 
-void SGitSourceControlSettings::OnCheckedUseGitLfsLocking(ECheckBoxState NewCheckedState)
-{
-	FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
-	GitSourceControl.AccessSettings().SetUsingGitLfsLocking(NewCheckedState == ECheckBoxState::Checked);
-	GitSourceControl.AccessSettings().SaveSettings();
-	GitSourceControl.GetProvider().UpdateSettings();
-}
-
-bool SGitSourceControlSettings::GetIsUsingGitLfsLocking() const
-{
-	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
-	return GitSourceControl.AccessSettings().IsUsingGitLfsLocking();
-}
-
-ECheckBoxState SGitSourceControlSettings::IsUsingGitLfsLocking() const
-{
-	return (GetIsUsingGitLfsLocking() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked);
-}
-
 void SGitSourceControlSettings::OnLfsUserNameCommited(const FText& InText, ETextCommit::Type InCommitType)
 {
 	FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
@@ -236,6 +252,64 @@ FText SGitSourceControlSettings::GetLfsUserName() const
 	// Shows the effective name (saved, else auto-detected, else Git user.name) without saving it: only a user commit writes the setting.
 	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
 	return FText::FromString(GitSourceControl.GetProvider().GetLockUser());
+}
+
+TSharedRef<SWidget> SGitSourceControlSettings::OnGenerateUnlockModeWidget(TSharedPtr<EGitUnlockMode> InMode) const
+{
+	const EGitUnlockMode Mode = InMode.IsValid() ? *InMode : EGitUnlockMode::OnMerge;
+	return SNew(STextBlock)
+		.Text(GetUnlockModeLabel(Mode))
+		.ToolTipText(GetUnlockModeTooltip(Mode));
+}
+
+void SGitSourceControlSettings::OnUnlockModeChanged(TSharedPtr<EGitUnlockMode> InMode, ESelectInfo::Type InSelectInfo)
+{
+	if (!InMode.IsValid())
+	{
+		return;
+	}
+	SelectedUnlockMode = InMode;
+	FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
+	GitSourceControl.AccessSettings().SetUnlockMode(*InMode);
+	GitSourceControl.AccessSettings().SaveSettings();
+	GitSourceControl.GetProvider().UpdateSettings();
+	GitSourceControl.GetProvider().SyncUnlockHook();
+}
+
+FText SGitSourceControlSettings::GetSelectedUnlockModeText() const
+{
+	const EGitUnlockMode Mode = FGitSourceControlModule::Get().AccessSettings().GetUnlockMode();
+	return GetUnlockModeLabel(Mode);
+}
+
+FText SGitSourceControlSettings::GetUnlockModeLabel(EGitUnlockMode InMode)
+{
+	switch (InMode)
+	{
+	case EGitUnlockMode::OnMerge:
+		return LOCTEXT("UnlockMode_OnMerge", "OnMerge (Default)");
+	case EGitUnlockMode::OnPush:
+		return LOCTEXT("UnlockMode_OnPush", "OnPush");
+	case EGitUnlockMode::None:
+		return LOCTEXT("UnlockMode_None", "None");
+	default:
+		return LOCTEXT("UnlockMode_OnMerge", "OnMerge (Default)");
+	}
+}
+
+FText SGitSourceControlSettings::GetUnlockModeTooltip(EGitUnlockMode InMode)
+{
+	switch (InMode)
+	{
+	case EGitUnlockMode::OnMerge:
+		return LOCTEXT("UnlockMode_OnMerge_Tooltip", "Unlock automatically when changes land on the remote base branch.");
+	case EGitUnlockMode::OnPush:
+		return LOCTEXT("UnlockMode_OnPush_Tooltip", "Unlock automatically when changes are pushed to a remote branch.");
+	case EGitUnlockMode::None:
+		return LOCTEXT("UnlockMode_None_Tooltip", "Never unlock automatically; release locks manually via Revert and Unlock.");
+	default:
+		return FText::GetEmpty();
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

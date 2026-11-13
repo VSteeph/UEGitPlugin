@@ -9,6 +9,7 @@
 #include "GitSourceControlCommand.h"
 #include "GitSourceControlModule.h"
 #include "GitSourceControlProvider.h"
+#include "GitSourceControlSettings.h"
 #include "HAL/PlatformProcess.h"
 
 #include "HAL/PlatformFile.h"
@@ -36,6 +37,10 @@
 #include "Async/Async.h"
 #include "UObject/Linker.h"
 
+#if PLATFORM_MAC || PLATFORM_LINUX
+#include <sys/stat.h>
+#endif
+
 #ifndef GIT_DEBUG_STATUS
 #define GIT_DEBUG_STATUS 0
 #endif
@@ -50,6 +55,8 @@ const int32 MaxFilesPerBatch = 50;
 
 FDateTime FGitLockedFilesCache::LastUpdated = FDateTime::MinValue();
 TMap<FString, FGitLfsLockInfo> FGitLockedFilesCache::LockedFiles = TMap<FString, FGitLfsLockInfo>();
+TSet<FString> FGitLockedFilesCache::ProtectedFreeFiles;
+FCriticalSection FGitLockedFilesCache::ProtectedFreeFilesLock;
 
 void FGitLockedFilesCache::SetLockedFiles(const TMap<FString, FGitLfsLockInfo>& newLocks)
 {
@@ -87,11 +94,37 @@ void FGitLockedFilesCache::RemoveLockedFile(const FString& filePath)
 
 void FGitLockedFilesCache::OnFileLockChanged(const FString& filePath, const FGitLfsLockInfo& lockInfo, bool locked)
 {
-	const FString LfsUserName = FGitSourceControlModule::Get().GetProvider().GetLockUser();
-	if (lockInfo.IsOwnedBy(LfsUserName))
+	if (!FPaths::FileExists(filePath))
 	{
-		FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*filePath, !locked);
+		return;
 	}
+	const FString LfsUserName = FGitSourceControlModule::Get().GetProvider().GetLockUser();
+	const bool bOwnLock = locked && lockInfo.IsOwnedBy(LfsUserName);
+	FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*filePath, !bOwnLock);
+	if (!locked)
+	{
+		FScopeLock ScopeLock(&ProtectedFreeFilesLock);
+		ProtectedFreeFiles.Add(filePath);
+	}
+}
+
+void FGitLockedFilesCache::ProtectFromUnlockedSave(const FString& filePath, ELockState::Type lockState)
+{
+	if (lockState == ELockState::NotLocked)
+	{
+		FScopeLock ScopeLock(&ProtectedFreeFilesLock);
+		bool bAlreadyProtected = false;
+		ProtectedFreeFiles.Add(filePath, &bAlreadyProtected);
+		if (bAlreadyProtected)
+		{
+			return;
+		}
+	}
+	else if (lockState != ELockState::LockedOther)
+	{
+		return;
+	}
+	FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*filePath, true);
 }
 
 namespace GitSourceControlUtils
@@ -493,7 +526,6 @@ bool CheckGitAvailability(const FString& InPathToGitBinary, FGitVersion* OutVers
 
 void ParseGitVersion(const FString& InVersionString, FGitVersion* OutVersion)
 {
-#if UE_BUILD_DEBUG
 	// Parse "git version 2.31.1.vfs.0.3" into the string "2.31.1.vfs.0.3"
 	const FString& TokenVersionStringPtr = InVersionString.RightChop(12);
 	if (!TokenVersionStringPtr.IsEmpty())
@@ -538,7 +570,6 @@ void ParseGitVersion(const FString& InVersionString, FGitVersion* OutVersion)
 			}
 		}
 	}
-#endif
 }
 
 // Find the root of the Git repository, looking from the provided path and upward in its parent directories.
@@ -1307,6 +1338,13 @@ static void ParseFileStatusResult(const FString& InPathToGitBinary, const FStrin
 #if UE_BUILD_DEBUG && GIT_DEBUG_STATUS
 					UE_LOG(LogSourceControl, Log, TEXT("Status(%s) Not Locked"), *File);
 #endif
+				}
+				// New content stays writable until committed: designers create assets without taking a lock.
+				const bool bTracked = FileState.State.FileState != EFileState::Added
+					&& (FileState.State.TreeState == ETreeState::Unmodified || FileState.State.TreeState == ETreeState::Working || FileState.State.TreeState == ETreeState::Staged);
+				if (bTracked)
+				{
+					FGitLockedFilesCache::ProtectFromUnlockedSave(File, FileState.State.LockState);
 				}
 			}
 			else
@@ -2374,15 +2412,226 @@ bool CheckLFSLockable(const FString& InPathToGitBinary, const FString& InReposit
 	return true;
 }
 
-bool FetchRemote(const FString& InPathToGitBinary, const FString& InPathToRepositoryRoot, bool InUsingGitLfsLocking, TArray<FString>& OutResults, TArray<FString>& OutErrorMessages)
+namespace
 {
-	// Force refresh lock states
-	if (InUsingGitLfsLocking)
+	const TCHAR* UnlockHookMarker = TEXT("# UEGitPlugin managed hook");
+
+	FString BuildUnlockHookScript(EGitUnlockMode InUnlockMode)
 	{
-		TMap<FString, FGitLfsLockInfo> Locks;
-		GetAllLocks(InPathToRepositoryRoot, InPathToGitBinary, OutErrorMessages, Locks, true);
+		const FString ModeValue = FGitSourceControlSettings::UnlockModeToString(InUnlockMode);
+		const TArray<FString> Lines = {
+			TEXT("#!/bin/sh"),
+			UnlockHookMarker,
+			FString::Printf(TEXT("UNLOCK_MODE=\"%s\""), *ModeValue),
+			TEXT(""),
+			TEXT("[ \"$1\" = \"committed\" ] || exit 0"),
+			TEXT("[ -z \"${UEGITPLUGIN_UNLOCK_HOOK_ACTIVE:-}\" ] || exit 0"),
+			TEXT(""),
+			TEXT("# Local-only transactions (commit, checkout, each rebase step) must exit before spawning any git process."),
+			TEXT("REMOTE_UPDATES=\"\""),
+			TEXT("while read -r old_oid new_oid ref_name; do"),
+			TEXT("\tcase \"$ref_name\" in"),
+			TEXT("\t\trefs/remotes/origin/HEAD) ;;"),
+			TEXT("\t\trefs/remotes/origin/*) REMOTE_UPDATES=\"$REMOTE_UPDATES$old_oid $new_oid $ref_name"),
+			TEXT("\" ;;"),
+			TEXT("\tesac"),
+			TEXT("done"),
+			TEXT("[ -n \"$REMOTE_UPDATES\" ] || exit 0"),
+			TEXT(""),
+			TEXT("export UEGITPLUGIN_UNLOCK_HOOK_ACTIVE=1"),
+			TEXT("[ \"$(git rev-parse --is-inside-work-tree </dev/null 2>/dev/null)\" = \"true\" ] || exit 0"),
+			TEXT(""),
+			TEXT("resolve_base_ref() {"),
+			TEXT("\tbase_ref=$(git symbolic-ref --quiet refs/remotes/origin/HEAD </dev/null 2>/dev/null)"),
+			TEXT("\tif [ -n \"$base_ref\" ] && [ \"$base_ref\" != \"refs/remotes/origin/HEAD\" ]; then"),
+			TEXT("\t\tprintf '%s\\n' \"$base_ref\""),
+			TEXT("\t\treturn 0"),
+			TEXT("\tfi"),
+			TEXT("\tfor candidate in refs/remotes/origin/develop refs/remotes/origin/dev refs/remotes/origin/main refs/remotes/origin/master; do"),
+			TEXT("\t\tif git show-ref --verify --quiet \"$candidate\" </dev/null 2>/dev/null; then"),
+			TEXT("\t\t\tprintf '%s\\n' \"$candidate\""),
+			TEXT("\t\t\treturn 0"),
+			TEXT("\t\tfi"),
+			TEXT("\tdone"),
+			TEXT("\treturn 1"),
+			TEXT("}"),
+			TEXT(""),
+			TEXT("is_zero_oid() {"),
+			TEXT("\tcase \"$1\" in"),
+			TEXT("\t\t\"\"|*[!0]*) return 1 ;;"),
+			TEXT("\t\t*) return 0 ;;"),
+			TEXT("\tesac"),
+			TEXT("}"),
+			TEXT(""),
+			TEXT("BASE_REF=\"\""),
+			TEXT("if [ \"$UNLOCK_MODE\" = \"OnMerge\" ]; then"),
+			TEXT("\tBASE_REF=$(resolve_base_ref) || exit 0"),
+			TEXT("fi"),
+			TEXT(""),
+			TEXT("LOCKS_CHECKED=0"),
+			TEXT("OWN_LOCKS=\"\""),
+			TEXT(""),
+			TEXT("load_own_locks() {"),
+			TEXT("\tif [ \"$LOCKS_CHECKED\" -eq 1 ]; then"),
+			TEXT("\t\t[ -n \"$OWN_LOCKS\" ]"),
+			TEXT("\t\treturn $?"),
+			TEXT("\tfi"),
+			TEXT("\tLOCKS_CHECKED=1"),
+			TEXT("\tlocks_out=$(git lfs locks --verify </dev/null 2>/dev/null)"),
+			TEXT("\tif [ $? -eq 0 ]; then"),
+			TEXT("\t\tOWN_LOCKS=$(printf '%s\\n' \"$locks_out\" | grep -E '^O[[:space:]]')"),
+			TEXT("\telse"),
+			TEXT("\t\tOWN_LOCKS=$(git lfs locks </dev/null 2>/dev/null) || OWN_LOCKS=\"\""),
+			TEXT("\tfi"),
+			TEXT("\t[ -n \"$OWN_LOCKS\" ]"),
+			TEXT("}"),
+			TEXT(""),
+			TEXT("printf '%s' \"$REMOTE_UPDATES\" | while read -r old_oid new_oid ref_name; do"),
+			TEXT("\tis_zero_oid \"$new_oid\" && continue"),
+			TEXT(""),
+			TEXT("\tif [ \"$UNLOCK_MODE\" = \"OnMerge\" ]; then"),
+			TEXT("\t\t[ \"$ref_name\" = \"$BASE_REF\" ] || continue"),
+			TEXT("\t\tis_zero_oid \"$old_oid\" && continue"),
+			TEXT("\t\tchanged_files=$(git -c core.quotePath=false diff --name-only \"$old_oid\" \"$new_oid\" </dev/null 2>/dev/null) || continue"),
+			TEXT("\telif [ \"$UNLOCK_MODE\" = \"OnPush\" ]; then"),
+			TEXT("\t\tif ! is_zero_oid \"$old_oid\"; then"),
+			TEXT("\t\t\tchanged_files=$(git -c core.quotePath=false diff --name-only \"$old_oid\" \"$new_oid\" </dev/null 2>/dev/null) || continue"),
+			TEXT("\t\telse"),
+			TEXT("\t\t\tif [ -z \"$BASE_REF\" ]; then"),
+			TEXT("\t\t\t\tBASE_REF=$(resolve_base_ref || true)"),
+			TEXT("\t\t\tfi"),
+			TEXT("\t\t\tif [ -n \"$BASE_REF\" ] && [ \"$BASE_REF\" != \"$ref_name\" ]; then"),
+			TEXT("\t\t\t\tchanged_files=$(git -c core.quotePath=false diff --name-only \"$BASE_REF...$new_oid\" </dev/null 2>/dev/null) || continue"),
+			TEXT("\t\t\telse"),
+			TEXT("\t\t\t\tchanged_files=$(git -c core.quotePath=false diff-tree --no-commit-id --name-only -r --root \"$new_oid\" </dev/null 2>/dev/null) || continue"),
+			TEXT("\t\t\tfi"),
+			TEXT("\t\tfi"),
+			TEXT("\telse"),
+			TEXT("\t\texit 0"),
+			TEXT("\tfi"),
+			TEXT(""),
+			TEXT("\t[ -n \"$changed_files\" ] || continue"),
+			TEXT("\tload_own_locks || continue"),
+			TEXT(""),
+			TEXT("\tprintf '%s\\n' \"$changed_files\" | while IFS= read -r file_path; do"),
+			TEXT("\t\t[ -n \"$file_path\" ] || continue"),
+			TEXT("\t\tprintf '%s\\n' \"$OWN_LOCKS\" | grep -F -q -- \"$file_path\" || continue"),
+			TEXT("\t\t[ -z \"$(git status --porcelain -- \"$file_path\" </dev/null 2>/dev/null)\" ] || continue"),
+			TEXT("\t\tgit diff --quiet \"$new_oid\" -- \"$file_path\" </dev/null 2>/dev/null || continue"),
+			TEXT("\t\tif ! git lfs unlock -- \"$file_path\" </dev/null >/dev/null 2>&1; then"),
+			TEXT("\t\t\tif [ ! -e \"$file_path\" ]; then"),
+			TEXT("\t\t\t\tlock_id=$(git lfs locks --path=\"$file_path\" </dev/null 2>/dev/null | sed -n 's/.*ID:\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"),
+			TEXT("\t\t\t\t[ -n \"$lock_id\" ] && git lfs unlock --id=\"$lock_id\" </dev/null >/dev/null 2>&1 || true"),
+			TEXT("\t\t\tfi"),
+			TEXT("\t\tfi"),
+			TEXT("\tdone"),
+			TEXT("done"),
+			TEXT(""),
+			TEXT("exit 0")
+		};
+		return FString::Join(Lines, TEXT("\n")) + TEXT("\n");
+	}
+}
+
+bool CheckGitLfsAvailability(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutErrorMessage)
+{
+	if (InPathToGitBinary.IsEmpty())
+	{
+		OutErrorMessage = TEXT("Git LFS is required, but no Git executable is configured.");
+		return false;
 	}
 
+	FString InfoMessages;
+	FString ErrorMessages;
+	const bool bSuccess = RunCommandInternalRaw(TEXT("lfs"), InPathToGitBinary, InRepositoryRoot, { TEXT("version") }, FGitSourceControlModule::GetEmptyStringArray(), InfoMessages, ErrorMessages);
+	if (bSuccess && InfoMessages.Contains(TEXT("git-lfs")))
+	{
+		return true;
+	}
+
+	ErrorMessages.TrimStartAndEndInline();
+	OutErrorMessage = ErrorMessages.IsEmpty()
+		? TEXT("Git LFS is required but was not found ('git lfs version' failed). Please install Git LFS and reconnect.")
+		: FString::Printf(TEXT("Git LFS is required but was not found (%s). Please install Git LFS and reconnect."), *ErrorMessages);
+	return false;
+}
+
+bool SyncUnlockHook(const FString& InPathToGitBinary, const FString& InRepositoryRoot, EGitUnlockMode InUnlockMode, FString& OutErrorMessage)
+{
+	if (InPathToGitBinary.IsEmpty() || InRepositoryRoot.IsEmpty())
+	{
+		OutErrorMessage = TEXT("Cannot install auto-unlock hook: Git binary or repository root is missing.");
+		return false;
+	}
+
+	TArray<FString> InfoMessages;
+	TArray<FString> ErrorMessages;
+	if (!RunCommandInternal(TEXT("rev-parse"), InPathToGitBinary, InRepositoryRoot, { TEXT("--git-path"), TEXT("hooks/reference-transaction") },
+		FGitSourceControlModule::GetEmptyStringArray(), InfoMessages, ErrorMessages) || InfoMessages.IsEmpty())
+	{
+		OutErrorMessage = FString::Printf(TEXT("Cannot locate Git hooks directory: %s"), *FString::Join(ErrorMessages, TEXT(" ")));
+		return false;
+	}
+
+	FString HookPath = InfoMessages[0].TrimStartAndEnd();
+	if (FPaths::IsRelative(HookPath))
+	{
+		HookPath = FPaths::Combine(InRepositoryRoot, HookPath);
+	}
+	FPaths::NormalizeFilename(HookPath);
+
+	const bool bExists = IFileManager::Get().FileExists(*HookPath);
+	FString ExistingContent;
+	if (bExists)
+	{
+		FFileHelper::LoadFileToString(ExistingContent, *HookPath);
+	}
+	const bool bIsManaged = bExists && ExistingContent.Contains(UnlockHookMarker);
+
+	if (InUnlockMode == EGitUnlockMode::None)
+	{
+		if (bIsManaged && !IFileManager::Get().Delete(*HookPath))
+		{
+			OutErrorMessage = FString::Printf(TEXT("Failed to remove auto-unlock hook '%s'."), *HookPath);
+			return false;
+		}
+		return true;
+	}
+
+	if (bExists && !bIsManaged)
+	{
+		OutErrorMessage = FString::Printf(TEXT("Cannot install auto-unlock hook: an unmanaged '%s' hook already exists."), *HookPath);
+		return false;
+	}
+
+	const FString DesiredContent = BuildUnlockHookScript(InUnlockMode);
+	if (bIsManaged && ExistingContent.Replace(TEXT("\r\n"), TEXT("\n")) == DesiredContent)
+	{
+		return true;
+	}
+
+	const FString HooksDir = FPaths::GetPath(HookPath);
+	if (!HooksDir.IsEmpty())
+	{
+		IFileManager::Get().MakeDirectory(*HooksDir, true);
+	}
+
+	const FTCHARToUTF8 Utf8Script(*DesiredContent);
+	TArray<uint8> RawBytes(reinterpret_cast<const uint8*>(Utf8Script.Get()), Utf8Script.Length());
+	if (!FFileHelper::SaveArrayToFile(RawBytes, *HookPath))
+	{
+		OutErrorMessage = FString::Printf(TEXT("Failed to write auto-unlock hook '%s'."), *HookPath);
+		return false;
+	}
+
+#if PLATFORM_MAC || PLATFORM_LINUX
+	chmod(TCHAR_TO_UTF8(*HookPath), 0755);
+#endif
+	return true;
+}
+
+bool FetchRemote(const FString& InPathToGitBinary, const FString& InPathToRepositoryRoot, bool InUsingGitLfsLocking, TArray<FString>& OutResults, TArray<FString>& OutErrorMessages)
+{
 	FString RemoteUrl;
 	if (!GetRemoteUrl(InPathToGitBinary, InPathToRepositoryRoot, RemoteUrl))
 	{
@@ -2458,6 +2707,13 @@ bool FetchRemote(const FString& InPathToGitBinary, const FString& InPathToReposi
 		{
 			UE_LOG(LogSourceControl, Verbose, TEXT("Skipped fetching 'origin/%s': %s"), *Branch, *FString::Join(OptionalErrorMessages, TEXT(" ")));
 		}
+	}
+
+	// Refresh lock states after fetching so any locks released by the reference-transaction hook are reflected immediately.
+	if (InUsingGitLfsLocking)
+	{
+		TMap<FString, FGitLfsLockInfo> Locks;
+		GetAllLocks(InPathToRepositoryRoot, InPathToGitBinary, OutErrorMessages, Locks, true);
 	}
 	return bBaseFetched;
 }
