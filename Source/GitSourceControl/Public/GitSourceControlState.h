@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include "GitSourceControlChangelist.h"
 #include "GitSourceControlRevision.h"
 #include "Runtime/Launch/Resources/Version.h"
 
@@ -142,20 +141,15 @@ public:
 	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> GetHistoryItem(int32 HistoryIndex) const override;
 	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FindHistoryRevision(int32 RevisionNumber) const override;
 	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FindHistoryRevision(const FString& InRevision) const override;
-#if ENGINE_MAJOR_VERSION < 5 || ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 3
+#if ENGINE_MINOR_VERSION < 3
 	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> GetBaseRevForMerge() const override;
 #else
 	virtual FResolveInfo GetResolveInfo() const override;
 #endif
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+#if ENGINE_MINOR_VERSION >= 2
 	virtual TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> GetCurrentRevision() const override;
 #endif
-#if ENGINE_MAJOR_VERSION >= 5
 	virtual FSlateIcon GetIcon() const override;
-#else
-	virtual FName GetIconName() const override;
-	virtual FName GetSmallIconName() const override;
-#endif
 	virtual FText GetDisplayName() const override;
 	virtual FText GetDisplayTooltip() const override;
 	virtual const FString& GetFilename() const override;
@@ -193,7 +187,7 @@ public:
 	/** Filename on disk */
 	FString LocalFilename;
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if ENGINE_MINOR_VERSION >= 3
 	/** Pending rev info with which a file must be resolved, invalid if no resolve pending */
 	FResolveInfo PendingResolveInfo;
 
@@ -204,10 +198,6 @@ public:
 
 	/** Status of the file */
 	FGitState State;
-
-#if ENGINE_MAJOR_VERSION == 5
-	FGitSourceControlChangelist Changelist;
-#endif
 
 	/** The timestamp of the last update */
 	FDateTime TimeStamp;

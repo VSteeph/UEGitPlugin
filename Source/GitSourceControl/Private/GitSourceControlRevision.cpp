@@ -16,17 +16,12 @@
 
 #define LOCTEXT_NAMESPACE "GitSourceControl"
 
-#if ENGINE_MAJOR_VERSION >= 5
 bool FGitSourceControlRevision::Get( FString& InOutFilename, EConcurrency::Type InConcurrency ) const
 {
 	if (InConcurrency != EConcurrency::Synchronous)
 	{
 		UE_LOG(LogSourceControl, Warning, TEXT("Only EConcurrency::Synchronous is tested/supported for this operation."));
 	}
-#else
-bool FGitSourceControlRevision::Get( FString& InOutFilename ) const
-{
-#endif
 	const FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe();
 	if (!GitSourceControl)
 	{

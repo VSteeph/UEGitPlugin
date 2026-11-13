@@ -21,14 +21,10 @@ public class GitSourceControl : ModuleRules
 				"UnrealEd",
 				"SourceControl",
 				"SourceControlWindows",
+				"ToolMenus",
 				"Projects"
 			}
 		);
-
-		if (Target.Version.MajorVersion == 5)
-		{
-			PrivateDependencyModuleNames.Add("ToolMenus");
-		}
 
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{

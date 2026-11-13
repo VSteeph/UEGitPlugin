@@ -9,8 +9,7 @@
 #include "ISourceControlProvider.h"
 #include "Runtime/Launch/Resources/Version.h"
 
-class SNotificationItem;
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 2
+#if ENGINE_MINOR_VERSION >= 2
 namespace ETextCommit { enum Type : int; }
 #else
 namespace ETextCommit { enum Type; }
@@ -30,8 +29,6 @@ public:
 
 	void Construct(const FArguments& InArgs);
 
-	~SGitSourceControlSettings();
-
 private:
 	void ConstructBasedOnEngineVersion( );
 
@@ -44,57 +41,10 @@ private:
 	FText GetUserName() const;
 	FText GetUserEmail() const;
 
-	EVisibility MustInitializeGitRepository() const;
-	bool CanInitializeGitRepository() const;
-	bool CanUseGitLfsLocking() const;
-
-	/** Delegate to initialize a new Git repository */
-	FReply OnClickedInitializeGitRepository();
-
-	void OnCheckedCreateGitIgnore(ECheckBoxState NewCheckedState);
-	bool bAutoCreateGitIgnore;
-
-	/** Delegates to create a README.md file */
-	void OnCheckedCreateReadme(ECheckBoxState NewCheckedState);
-	bool GetAutoCreateReadme() const;
-	bool bAutoCreateReadme;
-	void OnReadmeContentCommited(const FText& InText, ETextCommit::Type InCommitType);
-	FText GetReadmeContent() const;
-	FText ReadmeContent;
-
-	void OnCheckedCreateGitAttributes(ECheckBoxState NewCheckedState);
-	bool bAutoCreateGitAttributes;
-
 	void OnCheckedUseGitLfsLocking(ECheckBoxState NewCheckedState);
 	ECheckBoxState IsUsingGitLfsLocking() const;
 	bool GetIsUsingGitLfsLocking() const;
 
 	void OnLfsUserNameCommited(const FText& InText, ETextCommit::Type InCommitType);
 	FText GetLfsUserName() const;
-
-	void OnCheckedInitialCommit(ECheckBoxState NewCheckedState);
-	bool GetAutoInitialCommit() const;
-	bool bAutoInitialCommit;
-	void OnInitialCommitMessageCommited(const FText& InText, ETextCommit::Type InCommitType);
-	FText GetInitialCommitMessage() const;
-	FText InitialCommitMessage;
-
-	void OnRemoteUrlCommited(const FText& InText, ETextCommit::Type InCommitType);
-	FText GetRemoteUrl() const;
-	FText RemoteUrl;
-
-	/** Launch initial asynchronous add and commit operations */
-	void LaunchMarkForAddOperation(const TArray<FString>& InFiles);
-	void LaunchCheckInOperation();
-
-	/** Delegate called when a revision control operation has completed */
-	void OnSourceControlOperationComplete(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult);
-
-	/** Asynchronous operation progress notifications */
-	TWeakPtr<SNotificationItem> OperationInProgressNotification;
-	
-	void DisplayInProgressNotification(const FSourceControlOperationRef& InOperation);
-	void RemoveInProgressNotification();
-	void DisplaySuccessNotification(const FSourceControlOperationRef& InOperation);
-	void DisplayFailureNotification(const FSourceControlOperationRef& InOperation);
 };

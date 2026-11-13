@@ -12,20 +12,13 @@
 #include "HAL/PlatformProcess.h"
 
 #include "HAL/PlatformFile.h"
-#if ENGINE_MAJOR_VERSION >= 5
 #include "HAL/PlatformFileManager.h"
-#else
-#include "HAL/PlatformFilemanager.h"
-#endif
 
 #include "HAL/PlatformProcess.h"
 #include "Interfaces/IPluginManager.h"
 #include "ISourceControlModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "ISourceControlModule.h"
-#include "GitSourceControlModule.h"
-#include "GitSourceControlChangelistState.h"
 #include "Logging/MessageLog.h"
 #include "Misc/DateTime.h"
 #include "Misc/ScopeLock.h"
@@ -36,9 +29,6 @@
 #include "Misc/MessageDialog.h"
 
 #include "Runtime/Launch/Resources/Version.h"
-#if ENGINE_MAJOR_VERSION == 5 
-#include "UObject/ObjectSaveContext.h"
-#endif
 
 #include "Async/Async.h"
 #include "UObject/Linker.h"
@@ -54,31 +44,6 @@ namespace GitSourceControlConstants
 /** The maximum number of files we submit in a single Git command */
 const int32 MaxFilesPerBatch = 50;
 } // namespace GitSourceControlConstants
-
-FGitScopedTempFile::FGitScopedTempFile(const FText& InText)
-{
-	Filename = FPaths::CreateTempFilename(*FPaths::ProjectLogDir(), TEXT("Git-Temp"), TEXT(".txt"));
-	if (!FFileHelper::SaveStringToFile(InText.ToString(), *Filename, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-	{
-		UE_LOG(LogSourceControl, Error, TEXT("Failed to write to temp file: %s"), *Filename);
-	}
-}
-
-FGitScopedTempFile::~FGitScopedTempFile()
-{
-	if (FPaths::FileExists(Filename))
-	{
-		if (!FPlatformFileManager::Get().GetPlatformFile().DeleteFile(*Filename))
-		{
-			UE_LOG(LogSourceControl, Error, TEXT("Failed to delete temp file: %s"), *Filename);
-		}
-	}
-}
-
-const FString& FGitScopedTempFile::GetFilename() const
-{
-	return Filename;
-}
 
 FDateTime FGitLockedFilesCache::LastUpdated = FDateTime::MinValue();
 TMap<FString, FString> FGitLockedFilesCache::LockedFiles = TMap<FString, FString>();
@@ -170,11 +135,7 @@ namespace GitSourceControlUtils
 				}
 			}
 		}
-#if ENGINE_MAJOR_VERSION >= 5
 		if (!PackageNotIncludedInGit.IsEmpty())
-#else
-		if (PackageNotIncludedInGit.Num() > 0)
-#endif
 		{
 			for (const FString& ToRemoveFile : PackageNotIncludedInGit)
 			{
@@ -654,18 +615,6 @@ void GetUserConfig(const FString& InPathToGitBinary, const FString& InRepository
 
 bool GetBranchName(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutBranchName)
 {
-	const FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe();
-	if (!GitSourceControl)
-	{
-		return false;
-	}
-	const FGitSourceControlProvider& Provider = GitSourceControl->GetProvider();
-	if (!Provider.GetBranchName().IsEmpty())
-	{
-		OutBranchName = Provider.GetBranchName();
-		return true;
-	}
-	
 	bool bResults;
 	TArray<FString> InfoMessages;
 	TArray<FString> ErrorMessages;
@@ -700,18 +649,6 @@ bool GetBranchName(const FString& InPathToGitBinary, const FString& InRepository
 
 bool GetRemoteBranchName(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutBranchName)
 {
-	const FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe();
-	if (!GitSourceControl)
-	{
-		return false;
-	}
-	const FGitSourceControlProvider& Provider = GitSourceControl->GetProvider();
-	if (!Provider.GetRemoteBranchName().IsEmpty())
-	{
-		OutBranchName = Provider.GetRemoteBranchName();
-		return true;
-	}
-
 	TArray<FString> InfoMessages;
 	TArray<FString> ErrorMessages;
 	TArray<FString> Parameters;
@@ -851,12 +788,8 @@ bool RunLFSCommand(const FString& InCommand, const FString& InRepositoryRoot, co
 #if PLATFORM_WINDOWS
 	FString LFSLockBinary = FString::Printf(TEXT("%s/git-lfs.exe"), *BaseDir);
 #elif PLATFORM_MAC
-#if ENGINE_MAJOR_VERSION >= 5
 #if PLATFORM_MAC_ARM64
 	FString LFSLockBinary = FString::Printf(TEXT("%s/git-lfs-mac-arm64"), *BaseDir);
-#else
-	FString LFSLockBinary = FString::Printf(TEXT("%s/git-lfs-mac-amd64"), *BaseDir);
-#endif
 #else
 	FString LFSLockBinary = FString::Printf(TEXT("%s/git-lfs-mac-amd64"), *BaseDir);
 #endif
@@ -873,61 +806,6 @@ bool RunLFSCommand(const FString& InCommand, const FString& InRepositoryRoot, co
 #endif
 
 	return GitSourceControlUtils::RunCommand(Command, LFSLockBinary, InRepositoryRoot, InParameters, InFiles, OutResults, OutErrorMessages);
-}
-
-// Run a Git "commit" command by batches
-bool RunCommit(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InParameters, const TArray<FString>& InFiles,
-			   TArray<FString>& OutResults, TArray<FString>& OutErrorMessages)
-{
-	bool bResult = true;
-
-	TArray<FString> AddParameters{TEXT("-A")};
-
-	if (InFiles.Num() > GitSourceControlConstants::MaxFilesPerBatch)
-	{
-		// Batch files up so we dont exceed command-line limits
-		int32 FileCount = 0;
-		{
-			TArray<FString> FilesInBatch;
-			for (int32 FileIndex = 0; FileIndex < GitSourceControlConstants::MaxFilesPerBatch; FileIndex++, FileCount++)
-			{
-				FilesInBatch.Add(InFiles[FileCount]);
-			}
-			bResult &= RunCommandInternal(TEXT("add"), InPathToGitBinary, InRepositoryRoot, AddParameters, FilesInBatch, OutResults, OutErrorMessages);
-			// First batch is a simple "git commit" command with only the first files
-			bResult &= RunCommandInternal(TEXT("commit"), InPathToGitBinary, InRepositoryRoot, InParameters, FilesInBatch, OutResults, OutErrorMessages);
-		}
-
-		TArray<FString> Parameters;
-		for (const auto& Parameter : InParameters)
-		{
-			Parameters.Add(Parameter);
-		}
-		Parameters.Add(TEXT("--amend"));
-
-		while (FileCount < InFiles.Num())
-		{
-			TArray<FString> FilesInBatch;
-			for (int32 FileIndex = 0; FileCount < InFiles.Num() && FileIndex < GitSourceControlConstants::MaxFilesPerBatch; FileIndex++, FileCount++)
-			{
-				FilesInBatch.Add(InFiles[FileCount]);
-			}
-			// Next batches "amend" the commit with some more files
-			TArray<FString> BatchResults;
-			TArray<FString> BatchErrors;
-			bResult &= RunCommandInternal(TEXT("add"), InPathToGitBinary, InRepositoryRoot, AddParameters, FilesInBatch, OutResults, OutErrorMessages);
-			bResult &= RunCommandInternal(TEXT("commit"), InPathToGitBinary, InRepositoryRoot, Parameters, FilesInBatch, BatchResults, BatchErrors);
-			OutResults += BatchResults;
-			OutErrorMessages += BatchErrors;
-		}
-	}
-	else
-	{
-		bResult &= RunCommandInternal(TEXT("add"), InPathToGitBinary, InRepositoryRoot, AddParameters, InFiles, OutResults, OutErrorMessages);
-		bResult = RunCommandInternal(TEXT("commit"), InPathToGitBinary, InRepositoryRoot, InParameters, InFiles, OutResults, OutErrorMessages);
-	}
-
-	return bResult;
 }
 
 /**
@@ -1124,8 +1002,7 @@ public:
 	{
 		const FString& CommonAncestor = InResults[0]; // 1: The common ancestor of merged branches
 		CommonAncestorFileId = CommonAncestor.Mid(7, 40);
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
-		CommonAncestorFileId = CommonAncestor.Mid(7, 40);
+#if ENGINE_MINOR_VERSION >= 3
 		CommonAncestorFilename = CommonAncestor.Right(50);
 
 		if (ensure(InResults.IsValidIndex(2)))
@@ -1138,7 +1015,7 @@ public:
 	}
 
 	FString CommonAncestorFileId; ///< SHA1 Id of the file (warning: not the commit Id)
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if ENGINE_MINOR_VERSION >= 3
 	FString RemoteFileId;		///< SHA1 Id of the file (warning: not the commit Id)
 
 	FString CommonAncestorFilename;
@@ -1160,7 +1037,7 @@ static void RunGetConflictStatus(const FString& InPathToGitBinary, const FString
 	{
 		// Parse the unmerge status: extract the base revision (or the other branch?)
 		FGitConflictStatusParser ConflictStatus(Results);
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if ENGINE_MINOR_VERSION >= 3
 		InOutFileState.PendingResolveInfo.BaseFile = ConflictStatus.CommonAncestorFilename;
 		InOutFileState.PendingResolveInfo.BaseRevision = ConflictStatus.CommonAncestorFileId;
 		InOutFileState.PendingResolveInfo.RemoteFile = ConflictStatus.RemoteFilename;
@@ -1437,6 +1314,47 @@ void ParseStatusResults(const FString& InPathToGitBinary, const FString& InRepos
 	ParseFileStatusResult(InPathToGitBinary, InRepositoryRoot, InUsingLfsLocking, Files, InResults, OutStates);
 }
 
+static bool RemoteRefExists(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const FString& InRemoteBranch)
+{
+	FString Results;
+	FString Errors;
+	const FString FullRef = InRemoteBranch.StartsWith(TEXT("refs/"))
+		? InRemoteBranch
+		: (InRemoteBranch.StartsWith(TEXT("origin/"))
+			? (TEXT("refs/remotes/") + InRemoteBranch)
+			: (TEXT("refs/remotes/origin/") + InRemoteBranch));
+	return RunCommandInternalRaw(TEXT("show-ref"), InPathToGitBinary, InRepositoryRoot, { TEXT("--verify"), TEXT("--quiet"), FullRef }, FGitSourceControlModule::GetEmptyStringArray(), Results, Errors);
+}
+
+static bool ResolveRemoteBaseBranch(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutRemoteBaseBranch)
+{
+	TArray<FString> InfoMessages;
+	TArray<FString> ErrorMessages;
+	if (RunCommandInternal(TEXT("symbolic-ref"), InPathToGitBinary, InRepositoryRoot, { TEXT("--quiet"), TEXT("--short"), TEXT("refs/remotes/origin/HEAD") }, FGitSourceControlModule::GetEmptyStringArray(), InfoMessages, ErrorMessages)
+		&& InfoMessages.Num() > 0 && !InfoMessages[0].IsEmpty() && InfoMessages[0] != TEXT("origin/HEAD"))
+	{
+		OutRemoteBaseBranch = InfoMessages[0];
+		return true;
+	}
+
+	static const TCHAR* CandidateBranches[] = {
+		TEXT("origin/develop"),
+		TEXT("origin/dev"),
+		TEXT("origin/main"),
+		TEXT("origin/master")
+	};
+	for (const TCHAR* Candidate : CandidateBranches)
+	{
+		if (RemoteRefExists(InPathToGitBinary, InRepositoryRoot, Candidate))
+		{
+			OutRemoteBaseBranch = Candidate;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& Files,
 				 TArray<FString>& OutErrorMessages, TMap<FString, FGitSourceControlState>& OutStates)
 {
@@ -1453,6 +1371,12 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 
 	TSet<FString> BranchesToDiff{ StatusBranches };
 
+	FString RemoteBaseBranch;
+	if (ResolveRemoteBaseBranch(InPathToGitBinary, InRepositoryRoot, RemoteBaseBranch))
+	{
+		BranchesToDiff.Add(RemoteBaseBranch);
+	}
+
 	bool bDiffAgainstRemoteCurrent = false;
 
 	// Get the current branch's remote.
@@ -1463,6 +1387,18 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 		bDiffAgainstRemoteCurrent = true;
 		// Ensure that the remote branch is in there.
 		BranchesToDiff.Add(CurrentBranchName);
+	}
+	else
+	{
+		FString LocalBranchName;
+		if (GetBranchName(InPathToGitBinary, InRepositoryRoot, LocalBranchName)
+			&& !LocalBranchName.StartsWith(TEXT("HEAD detached"))
+			&& RemoteRefExists(InPathToGitBinary, InRepositoryRoot, TEXT("origin/") + LocalBranchName))
+		{
+			CurrentBranchName = TEXT("origin/") + LocalBranchName;
+			bDiffAgainstRemoteCurrent = true;
+			BranchesToDiff.Add(CurrentBranchName);
+		}
 	}
 
 	if (!BranchesToDiff.Num())
@@ -1479,34 +1415,34 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 	TMap<FString, FString> NewerFiles;
 
 	const FString AbsoluteProjectDirPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	const FString AbsolutePluginsDirPath = FPaths::Combine(AbsoluteProjectDirPath, "Plugins/");
-	const FString AbsoluteBinariesDirPath = FPaths::Combine(AbsoluteProjectDirPath, "Binaries/");
-	const FString AbsoluteChecksumFilePath = FPaths::Combine(AbsoluteProjectDirPath, ".checksum");
+	const FString AbsoluteContentDirPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir());
+	const FString AbsolutePluginsDirPath = FPaths::Combine(AbsoluteProjectDirPath, TEXT("Plugins/"));
 
-	//const TArray<FString>& RelativeFiles = RelativeFilenames(Files, InRepositoryRoot);
-	// Get the full remote status of the Content and Plugins folder, since it's the only lockable folder we track in editor. 
-	// This shows any new files as well.
-	// Also update the status of `.checksum`.
-	const TArray<FString> FilesToDiff
+	TArray<FString> FilesToDiff;
+	if (AbsoluteContentDirPath.StartsWith(InRepositoryRoot))
 	{
-		FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()),
-		AbsoluteChecksumFilePath,
-		AbsoluteBinariesDirPath,
-		AbsolutePluginsDirPath,
-	};
-	
+		FilesToDiff.AddUnique(AbsoluteContentDirPath);
+	}
+	if (AbsolutePluginsDirPath.StartsWith(InRepositoryRoot))
+	{
+		FilesToDiff.AddUnique(AbsolutePluginsDirPath);
+	}
+	for (const FString& File : Files)
+	{
+		if (File.StartsWith(InRepositoryRoot))
+		{
+			FilesToDiff.AddUnique(File);
+		}
+	}
+	if (FilesToDiff.IsEmpty())
+	{
+		return;
+	}
+
 	TArray<FString> ParametersLog{TEXT("--pretty="), TEXT("--name-only"), TEXT(""), TEXT("--")};
 	for (auto& Branch : BranchesToDiff)
 	{
-		bool bCurrentBranch;
-		if (bDiffAgainstRemoteCurrent && Branch.Equals(CurrentBranchName))
-		{
-			bCurrentBranch = true;
-		}
-		else
-		{
-			bCurrentBranch = false;
-		}
+		const bool bCurrentBranch = bDiffAgainstRemoteCurrent && Branch.Equals(CurrentBranchName);
 		// empty defaults to HEAD
 		// .. means commits in the right that are not in the left
 		ParametersLog[2] = FString::Printf(TEXT("..%s"), *Branch);
@@ -1514,17 +1450,20 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 		const bool bResultLog = RunCommand(TEXT("log"), InPathToGitBinary, InRepositoryRoot, ParametersLog, FilesToDiff, LogResults, ErrorMessages);
 		if (bResultLog)
 		{
-			// Status Branches may not be initialized because they're not in use by the project. They can also be not initilaized in some other quirky circumstances
-			// eg. When running multi client / dedicated server in editor without running them under the same process, those game instances will run as an editor instance
-			// which means editor plugins are enabled and running, but they don't run UnrealEdEngine, so the status branches are not initialized.
-			if (StatusBranches.Num() > 0)
+			if (!bCurrentBranch)
 			{
-				// Check if the files state in the branch in which is changed is actually different from compared branch
-				// This opens files for edit if they were modified in another branch but have since been reverted back to state in status.
-				TArray<FString> DiffParametersLog{ TEXT("--pretty="), TEXT("--name-only"), FString::Printf(TEXT("...%s"), *Branch), TEXT(""), TEXT("--") };
+				// Compare against HEAD, not the merge base: after a squash merge the base branch holds the same content
+				// in a commit HEAD does not contain, and that file must stay current.
+				TArray<FString> DiffParametersLog{ TEXT("--name-only"), TEXT("HEAD"), Branch, TEXT("--") };
 				const bool bResultDiff = RunCommand(TEXT("diff"), InPathToGitBinary, InRepositoryRoot, DiffParametersLog, FilesToDiff, DiffResults, ErrorMessages);
-				// Get the intersection of the 2 containers
-				Intersection = DiffResults.FilterByPredicate([&LogResults](const FString& ChangedFile) { return LogResults.Contains(ChangedFile); });
+				if (bResultDiff)
+				{
+					Intersection = DiffResults.FilterByPredicate([&LogResults](const FString& ChangedFile) { return LogResults.Contains(ChangedFile); });
+				}
+				else
+				{
+					Intersection = LogResults;
+				}
 			}
 			else
 			{
@@ -1538,12 +1477,6 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 				// Don't care about mergeable files (.collection, .ini, .uproject, etc)
 				if (!IsFileLFSLockable(NewerFileName))
 				{
-					// Check if there's newer binaries pending on this branch
-					if (bCurrentBranch && (NewerFilePath == AbsoluteChecksumFilePath || NewerFilePath.StartsWith(AbsoluteBinariesDirPath, ESearchCase::IgnoreCase) ||
-						NewerFilePath.StartsWith(AbsolutePluginsDirPath, ESearchCase::IgnoreCase)))
-					{
-						Provider.bPendingRestart = true;
-					}
 					continue;
 				}
 
@@ -1562,7 +1495,7 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 	{
 		if (FGitSourceControlState* FileState = OutStates.Find(NewFile.Key))
 		{
-			FileState->State.RemoteState = NewFile.Value.Equals(CurrentBranchName) ? ERemoteState::NotAtHead : ERemoteState::NotLatest;
+			FileState->State.RemoteState = (bDiffAgainstRemoteCurrent && NewFile.Value.Equals(CurrentBranchName)) ? ERemoteState::NotAtHead : ERemoteState::NotLatest;
 			FileState->State.HeadBranch = NewFile.Value;
 		}
 	}
@@ -1693,62 +1626,6 @@ FString GetFullPathFromGitStatus(const FString& Result, const FString& InReposit
 	return File;
 }
 
-#if ENGINE_MAJOR_VERSION == 5
-bool UpdateChangelistStateByCommand()
-{
-	// TODO: This is a temporary solution.
-	FModuleManager &ModuleManager = FModuleManager::Get();
-	FName GitModuleName = "GitSourceControl";
-
-	if (!ModuleManager.IsModuleLoaded(GitModuleName))
-	{
-		UE_LOG(LogSourceControl, Warning, TEXT("GitSourceControl module is not loaded."));
-		return false;
-	}
-	
-	FGitSourceControlModule& GitSourceControl = FModuleManager::GetModuleChecked<FGitSourceControlModule>("GitSourceControl");
-	FGitSourceControlProvider& Provider = GitSourceControl.GetProvider();
-	if (!Provider.IsGitAvailable())
-	{
-		return false;
-	}
-	TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe> StagedChangelist = Provider.GetStateInternal(FGitSourceControlChangelist::StagedChangelist);
-	TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe> WorkingChangelist = Provider.GetStateInternal(FGitSourceControlChangelist::WorkingChangelist);
-	StagedChangelist->Files.RemoveAll([](const FSourceControlStateRef& InState){ return true; });
-	WorkingChangelist->Files.RemoveAll([](const FSourceControlStateRef& InState){ return true; });
-
-	TArray<FString> Files;
-	Files.Add(TEXT("Content/"));
-	TArray<FString> Parameters;
-	Parameters.Add(TEXT("--porcelain"));
-	TArray<FString> Results;
-	TArray<FString> ErrorMsg;
-	const bool bResult = RunCommand(TEXT("--no-optional-locks status"), Provider.GetGitBinaryPath(), Provider.GetPathToRepositoryRoot(), Parameters, Files, Results, ErrorMsg);
-	for (const auto& Result : Results)
-	{
-		FString File = GetFullPathFromGitStatus(Result, Provider.GetPathToRepositoryRoot());
-		TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> State = Provider.GetStateInternal(File);
-		// Staged check
-		if (!TChar<TCHAR>::IsWhitespace(Result[0]))
-		{
-			WorkingChangelist->Files.Remove(State);
-			UpdateFileStagingOnSavedInternal(Result);
-			State->Changelist = FGitSourceControlChangelist::StagedChangelist;
-			StagedChangelist->Files.AddUnique(State);
-			continue;
-		}
-		// Working check
-		if (!TChar<TCHAR>::IsWhitespace(Result[1]))
-		{
-			StagedChangelist->Files.Remove(State);
-			State->Changelist = FGitSourceControlChangelist::WorkingChangelist;
-			WorkingChangelist->Files.AddUnique(State);
-		}
-	}
-	return true;
-}
-#endif
-	
 // Run a batch of Git "status" command to update status of given files and/or directories.
 bool RunUpdateStatus(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const bool InUsingLfsLocking, const TArray<FString>& InFiles,
 					 TArray<FString>& OutErrorMessages, TMap<FString, FGitSourceControlState>& OutStates)
@@ -1780,45 +1657,11 @@ bool RunUpdateStatus(const FString& InPathToGitBinary, const FString& InReposito
 		ParseStatusResults(InPathToGitBinary, InRepositoryRoot, InUsingLfsLocking, RepoFiles, ResultsMap, OutStates);
 	}
 
-#if ENGINE_MAJOR_VERSION == 5
-	UpdateChangelistStateByCommand();
-#endif
-
 	CheckRemote(InPathToGitBinary, InRepositoryRoot, RepoFiles, OutErrorMessages, OutStates);
 
 	return bResult;
 }
 
-#if ENGINE_MAJOR_VERSION == 5
-void UpdateFileStagingOnSaved(const FString& Filename, UPackage* Pkg, FObjectPostSaveContext ObjectSaveContext)
-{
-	UpdateFileStagingOnSavedInternal(Filename);
-}
-	
-bool UpdateFileStagingOnSavedInternal(const FString& Filename)
-{
-	bool bResult = false;
-	FGitSourceControlModule& GitSourceControl = FModuleManager::GetModuleChecked<FGitSourceControlModule>("GitSourceControl");
-	FGitSourceControlProvider& Provider = GitSourceControl.GetProvider();
-	if (!Provider.IsGitAvailable())
-	{
-		return bResult;
-	}
-	TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> State = Provider.GetStateInternal(Filename);
-
-	if (State->Changelist.GetName().Equals(TEXT("Staged")))
-	{
-		TArray<FString> File;
-		File.Add(Filename);
-		TArray<FString> DummyResults;
-		TArray<FString> DummyMsgs;
-		bResult = RunCommand(TEXT("add"), Provider.GetGitBinaryPath(), Provider.GetPathToRepositoryRoot(), FGitSourceControlModule::GetEmptyStringArray(), File, DummyResults, DummyMsgs);
-	}
-	
-	return bResult;
-}
-#endif
-	
 void UpdateStateOnAssetRename(const FAssetData& InAssetData, const FString& InOldName)
 {
 	FGitSourceControlModule& GitSourceControl = FModuleManager::GetModuleChecked<FGitSourceControlModule>("GitSourceControl");
@@ -1829,7 +1672,7 @@ void UpdateStateOnAssetRename(const FAssetData& InAssetData, const FString& InOl
 	}
 	TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> State = Provider.GetStateInternal(InOldName);	
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if ENGINE_MINOR_VERSION >= 1
 	State->LocalFilename = InAssetData.GetObjectPathString();
 #else
 	State->LocalFilename = InAssetData.ObjectPath.ToString();
@@ -1895,11 +1738,7 @@ bool RunDumpToFile(const FString& InPathToGitBinary, const FString& InRepository
         }
     #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && 0
-	FProcHandle ProcessHandle = FPlatformProcess::CreateProc(*PathToGitOrEnvBinary, *FullCommand, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, nullptr, 0, *InRepositoryRoot, PipeWrite, nullptr, nullptr);
-#else
 	FProcHandle ProcessHandle = FPlatformProcess::CreateProc(*PathToGitOrEnvBinary, *FullCommand, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, nullptr, 0, *InRepositoryRoot, PipeWrite);
-#endif
 	if(ProcessHandle.IsValid())
 	{
 		FPlatformProcess::Sleep(0.01f);
@@ -2418,110 +2257,84 @@ bool FetchRemote(const FString& InPathToGitBinary, const FString& InPathToReposi
 		TMap<FString, FString> Locks;
 		GetAllLocks(InPathToRepositoryRoot, InPathToGitBinary, OutErrorMessages, Locks, true);
 	}
-	TArray<FString> Params{"--no-tags"};
-	// fetch latest repo
-	// TODO specify branches?
 
-	Params.Add(TEXT("--prune"));
-	return RunCommand(TEXT("fetch"), InPathToGitBinary, InPathToRepositoryRoot, Params,
-					  FGitSourceControlModule::GetEmptyStringArray(), OutResults, OutErrorMessages);
-}
-
-bool PullOrigin(const FString& InPathToGitBinary, const FString& InPathToRepositoryRoot, const TArray<FString>& InFiles, TArray<FString>& OutFiles,
-				TArray<FString>& OutResults, TArray<FString>& OutErrorMessages)
-{
-	if (FGitSourceControlModule::Get().GetProvider().bPendingRestart)
-	{
-		FText PullFailMessage(LOCTEXT("Git_NeedBinariesUpdate_Msg", "Refused to Git Pull because your editor binaries are out of date.\n\n"
-																	"Without a binaries update, new assets can become corrupted or cause crashes due to format "
-																	"differences.\n\n"
-																	"Please exit the editor, and update the project."));
-		FText PullFailTitle(LOCTEXT("Git_NeedBinariesUpdate_Title", "Binaries Update Required"));
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
-		FMessageDialog::Open(EAppMsgType::Ok, PullFailMessage, PullFailTitle);
-#else		
-		FMessageDialog::Open(EAppMsgType::Ok, PullFailMessage, &PullFailTitle);
-#endif
-		UE_LOG(LogSourceControl, Log, TEXT("Pull failed because we need a binaries update"));
-		return false;
-	}
-
-	const TSet<FString> AlreadyReloaded {InFiles};
-
-	// Get remote branch
-	FString RemoteBranch;
-	if (!GetRemoteBranchName(InPathToGitBinary, InPathToRepositoryRoot, RemoteBranch))
-	{
-		// No remote to sync from
-		return false;
-	}
-
-	// Get the list of files which will be updated (either ones we changed locally, which will get potentially rebased or merged, or the remote ones that will update)
-	TArray<FString> DifferentFiles;
-	const bool bResultDiff = RunCommand(TEXT("diff"), InPathToGitBinary, InPathToRepositoryRoot, { TEXT("--name-only"), RemoteBranch }, FGitSourceControlModule::GetEmptyStringArray(), DifferentFiles, OutErrorMessages);
-	if (!bResultDiff)
-	{
-		return false;
-	}
-
-	// Nothing to pull
-	if (!DifferentFiles.Num())
+	FString RemoteUrl;
+	if (!GetRemoteUrl(InPathToGitBinary, InPathToRepositoryRoot, RemoteUrl))
 	{
 		return true;
 	}
 
-	const TArray<FString>& AbsoluteDifferentFiles = AbsoluteFilenames(DifferentFiles, InPathToRepositoryRoot);
-
-	if (AlreadyReloaded.Num())
+	auto StripOriginPrefix = [](FString Branch) -> FString
 	{
-		OutFiles.Reserve(AbsoluteDifferentFiles.Num() - AlreadyReloaded.Num());
-		for (const auto& File : AbsoluteDifferentFiles)
+		Branch.RemoveFromStart(TEXT("refs/remotes/"));
+		Branch.RemoveFromStart(TEXT("origin/"));
+		return Branch;
+	};
+
+	FString BaseBranchShort;
+	FString RemoteBaseBranch;
+	if (ResolveRemoteBaseBranch(InPathToGitBinary, InPathToRepositoryRoot, RemoteBaseBranch))
+	{
+		BaseBranchShort = StripOriginPrefix(RemoteBaseBranch);
+	}
+
+	TArray<FString> BranchesToFetch;
+	FString UpstreamBranch;
+	if (GetRemoteBranchName(InPathToGitBinary, InPathToRepositoryRoot, UpstreamBranch))
+	{
+		const FString UpstreamShort = StripOriginPrefix(UpstreamBranch);
+		if (!UpstreamShort.IsEmpty())
 		{
-			if (!AlreadyReloaded.Contains(File))
-			{
-				OutFiles.Add(File);
-			}
+			BranchesToFetch.AddUnique(UpstreamShort);
 		}
 	}
 	else
 	{
-		OutFiles.Append(AbsoluteDifferentFiles);
-	}
-
-	TArray<FString> Files;
-	for (const auto& File : OutFiles)
-	{
-		if (IsFileLFSLockable(File))
+		FString LocalBranchName;
+		if (GetBranchName(InPathToGitBinary, InPathToRepositoryRoot, LocalBranchName)
+			&& !LocalBranchName.StartsWith(TEXT("HEAD detached"))
+			&& RemoteRefExists(InPathToGitBinary, InPathToRepositoryRoot, TEXT("origin/") + LocalBranchName))
 		{
-			Files.Add(File);
+			BranchesToFetch.AddUnique(LocalBranchName);
 		}
 	}
 
-	const bool bShouldReload = Files.Num() > 0;
-	TArray<UPackage*> PackagesToReload;
-	if (bShouldReload)
+	if (const FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe())
 	{
-		const auto PackagesToReloadResult = Async(EAsyncExecution::TaskGraphMainThread, [=] {
-			return UnlinkPackages(Files);
-		});
-		PackagesToReload = PackagesToReloadResult.Get();
+		for (const FString& StatusBranch : GitSourceControl->GetProvider().GetStatusBranchNames())
+		{
+			const FString StatusShort = StripOriginPrefix(StatusBranch);
+			if (!StatusShort.IsEmpty())
+			{
+				BranchesToFetch.AddUnique(StatusShort);
+			}
+		}
 	}
 
-	// Reset HEAD and index to remote
-	TArray<FString> InfoMessages;
-	bool bSuccess = RunCommand(TEXT("pull"), InPathToGitBinary, InPathToRepositoryRoot, { "--rebase", "--autostash" }, FGitSourceControlModule::GetEmptyStringArray(),
-										  InfoMessages, OutErrorMessages);
-
-	if (bShouldReload)
+	BranchesToFetch.Remove(BaseBranchShort);
+	if (BaseBranchShort.IsEmpty() && BranchesToFetch.IsEmpty())
 	{
-		const auto ReloadPackagesResult = Async(EAsyncExecution::TaskGraphMainThread, [=] {
-			TArray<UPackage*> Packages = PackagesToReload;
-			ReloadPackages(Packages);
-		});
-		ReloadPackagesResult.Wait();
+		BaseBranchShort = TEXT("HEAD");
 	}
 
-	return bSuccess;
+	auto FetchBranch = [&](const FString& Branch, TArray<FString>& ErrorMessages)
+	{
+		return RunCommand(TEXT("fetch"), InPathToGitBinary, InPathToRepositoryRoot, { TEXT("--no-tags"), TEXT("origin"), Branch },
+						  FGitSourceControlModule::GetEmptyStringArray(), OutResults, ErrorMessages);
+	};
+
+	// A single fetch of several branches aborts entirely when one of them is gone from the remote,
+	// which is the normal state of a feature branch once its pull request is merged.
+	const bool bBaseFetched = BaseBranchShort.IsEmpty() || FetchBranch(BaseBranchShort, OutErrorMessages);
+	for (const FString& Branch : BranchesToFetch)
+	{
+		TArray<FString> OptionalErrorMessages;
+		if (!FetchBranch(Branch, OptionalErrorMessages))
+		{
+			UE_LOG(LogSourceControl, Verbose, TEXT("Skipped fetching 'origin/%s': %s"), *Branch, *FString::Join(OptionalErrorMessages, TEXT(" ")));
+		}
+	}
+	return bBaseFetched;
 }
 
 TSharedPtr<ISourceControlRevision, ESPMode::ThreadSafe> GetOriginRevisionOnBranch( const FString & InPathToGitBinary, const FString & InRepositoryRoot, const FString & InRelativeFileName, TArray<FString> & OutErrorMessages, const FString & BranchName )

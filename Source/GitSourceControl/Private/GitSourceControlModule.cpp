@@ -6,11 +6,7 @@
 #include "GitSourceControlModule.h"
 
 #include "AssetToolsModule.h"
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 #include "Styling/AppStyle.h"
-#else
-#include "EditorStyleSet.h"
-#endif
 #include "Misc/App.h"
 #include "Modules/ModuleManager.h"
 #include "Features/IModularFeatures.h"
@@ -54,15 +50,9 @@ void FGitSourceControlModule::StartupModule()
 	GitSourceControlProvider.RegisterWorker( "MarkForAdd", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitMarkForAddWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Delete", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitDeleteWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Revert", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitRevertWorker> ) );
-	GitSourceControlProvider.RegisterWorker( "Sync", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitSyncWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Fetch", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitFetchWorker> ) );
-	GitSourceControlProvider.RegisterWorker( "CheckIn", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitCheckInWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Copy", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitCopyWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Resolve", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitResolveWorker> ) );
-#if ENGINE_MAJOR_VERSION == 5
-	GitSourceControlProvider.RegisterWorker( "MoveToChangelist", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitMoveToChangelistWorker> ) );
-	GitSourceControlProvider.RegisterWorker( "UpdateChangelistsStatus", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitUpdateStagingWorker> ) );
-#endif
 
 	// load our settings
 	GitSourceControlSettings.LoadSettings();
@@ -105,18 +95,10 @@ void FGitSourceControlModule::StartupModule()
 
 	FContentBrowserModule & ContentBrowserModule = FModuleManager::Get().LoadModuleChecked< FContentBrowserModule >( NAME_ContentBrowser );
 
-#if ENGINE_MAJOR_VERSION >= 5
-	// Register ContentBrowserDelegate Handles for UE5 EA
-	// At the time of writing this UE5 is in Early Access and has no support for revision control yet. So instead we hook into the content browser..
-	// .. and force a state update on the next tick for revision control. Usually the contentbrowser assets will request this themselves, but that's not working
-	// Values here are 1 or 2 based on whether the change can be done immediately or needs to be delayed as unreal needs to work through its internal delegates first
-	// >> Technically you wouldn't need to use `GetOnAssetSelectionChanged` -- but it's there as a safety mechanism. States aren't forceupdated for the first path that loads
-	// >> Making sure we force an update on selection change that acts like a just in case other measures fail
 	CbdHandle_OnFilterChanged = ContentBrowserModule.GetOnFilterChanged().AddLambda( [this]( const FARFilter&, bool ) { GitSourceControlProvider.TicksUntilNextForcedUpdate = 2; } );
 	CbdHandle_OnSearchBoxChanged = ContentBrowserModule.GetOnSearchBoxChanged().AddLambda( [this]( const FText&, bool ){ GitSourceControlProvider.TicksUntilNextForcedUpdate = 1; } );
 	CbdHandle_OnAssetSelectionChanged = ContentBrowserModule.GetOnAssetSelectionChanged().AddLambda( [this]( const TArray<FAssetData>&, bool ) { GitSourceControlProvider.TicksUntilNextForcedUpdate = 1; } );
 	CbdHandle_OnAssetPathChanged = ContentBrowserModule.GetOnAssetPathChanged().AddLambda( [this]( const FString& ) { GitSourceControlProvider.TicksUntilNextForcedUpdate = 2; } );
-#endif
 
 	TArray<FContentBrowserMenuExtender_SelectedAssets>& CBAssetMenuExtenderDelegates = ContentBrowserModule.GetAllAssetViewContextMenuExtenders();
 	CBAssetMenuExtenderDelegates.Add(FContentBrowserMenuExtender_SelectedAssets::CreateRaw( this, &FGitSourceControlModule::OnExtendContentBrowserAssetSelectionMenu ));
@@ -134,12 +116,10 @@ void FGitSourceControlModule::ShutdownModule()
 
 	// Unregister ContentBrowserDelegate Handles
     FContentBrowserModule & ContentBrowserModule = FModuleManager::Get().GetModuleChecked< FContentBrowserModule >( NAME_ContentBrowser );
-#if ENGINE_MAJOR_VERSION >= 5
 	ContentBrowserModule.GetOnFilterChanged().Remove( CbdHandle_OnFilterChanged );
 	ContentBrowserModule.GetOnSearchBoxChanged().Remove( CbdHandle_OnSearchBoxChanged );
 	ContentBrowserModule.GetOnAssetSelectionChanged().Remove( CbdHandle_OnAssetSelectionChanged );
 	ContentBrowserModule.GetOnAssetPathChanged().Remove( CbdHandle_OnAssetPathChanged );
-#endif
 	
 	TArray<FContentBrowserMenuExtender_SelectedAssets>& CBAssetMenuExtenderDelegates = ContentBrowserModule.GetAllAssetViewContextMenuExtenders();
 	CBAssetMenuExtenderDelegates.RemoveAll([ &ExtenderDelegateHandle = CbdHandle_OnExtendAssetSelectionMenu ]( const FContentBrowserMenuExtender_SelectedAssets& Delegate ) {
@@ -192,11 +172,7 @@ void FGitSourceControlModule::CreateGitContentBrowserAssetMenu(FMenuBuilder& Men
 	MenuBuilder.AddMenuEntry(
 		FText::Format(LOCTEXT("StatusBranchDiff", "Diff against status branch"), FText::FromString(BranchName)),
 		FText::Format(LOCTEXT("StatusBranchDiffDesc", "Compare this asset to the latest status branch version"), FText::FromString(BranchName)),
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "SourceControl.Actions.Diff"),
-#else
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "SourceControl.Actions.Diff"),
-#endif
 		FUIAction(FExecuteAction::CreateRaw( this, &FGitSourceControlModule::DiffAssetAgainstGitOriginBranch, SelectedAssets, BranchName ))
 	);
 }
@@ -237,11 +213,7 @@ void FGitSourceControlModule::DiffAgainstOriginBranch( UObject * InObject, const
 	{
 		// Get the file name of package
 		FString RelativeFileName;
-#if ENGINE_MAJOR_VERSION >= 5
 		if (FPackageName::DoesPackageExist(InPackagePath, &RelativeFileName))
-#else
-		if (FPackageName::DoesPackageExist(InPackagePath, nullptr, &RelativeFileName))
-#endif
 		{
 			// if(SourceControlState->GetHistorySize() > 0)
 			{
