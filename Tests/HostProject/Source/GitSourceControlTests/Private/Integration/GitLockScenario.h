@@ -37,7 +37,7 @@ struct FGitLockScenario
 	FString OriginalRemoteUrl;
 
 	explicit FGitLockScenario(FAutomationTestBase& Test)
-		: Repository(Test, true)
+		: Repository(Test)
 	{
 		// Outside Content/ so the asset registry never tries to load this fake package.
 		RelativeAsset = FString::Printf(TEXT("Fixtures/Lock-%s.uasset"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));

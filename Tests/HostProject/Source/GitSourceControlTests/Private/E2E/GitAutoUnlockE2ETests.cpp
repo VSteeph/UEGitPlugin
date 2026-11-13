@@ -10,15 +10,15 @@ namespace GitAutoUnlockE2ETests
 	void LockEditAndPush(const TSharedRef<FGitE2ESession>& Session)
 	{
 		GitE2E::CheckOutFromContentBrowser(Session, 0);
-		GitE2E::Do(Session, [Session]() { return Session->EditAndSave(Session->Assets[0], FGitE2ESession::EditedValue); });
-		GitE2E::Do(Session, [Session]() { return Session->CommitAndPush(Session->Assets[0]); });
+		GitE2E::Do(Session, TEXT("the designer edits and saves the asset"), [Session]() { return Session->EditAndSave(Session->Assets[0], FGitE2ESession::EditedValue); });
+		GitE2E::Do(Session, TEXT("the designer commits and pushes from Fork"), [Session]() { return Session->CommitAndPush(Session->Assets[0]); });
 	}
 
 	/** The pull request evolves: another edit saved in the editor, committed and pushed to the same branch. */
 	void EditAndPushAgain(const TSharedRef<FGitE2ESession>& Session)
 	{
-		GitE2E::Do(Session, [Session]() { return Session->EditAndSave(Session->Assets[0], 6.0f); });
-		GitE2E::Do(Session, [Session]() { return Session->CommitAndPush(Session->Assets[0]); });
+		GitE2E::Do(Session, TEXT("the designer edits and saves the asset again"), [Session]() { return Session->EditAndSave(Session->Assets[0], 6.0f); });
+		GitE2E::Do(Session, TEXT("the designer commits and pushes again"), [Session]() { return Session->CommitAndPush(Session->Assets[0]); });
 	}
 
 	bool IsLockedBy(const TSharedRef<FGitE2ESession>& Session, const TCHAR* Owner)
@@ -33,12 +33,13 @@ namespace GitAutoUnlockE2ETests
 
 	void SelectUnlockMode(const TSharedRef<FGitE2ESession>& Session, EGitUnlockMode Mode)
 	{
-		GitE2E::Do(Session, [Session, Mode]() { return Session->SelectUnlockMode(Mode); });
+		GitE2E::Do(Session, FString::Printf(TEXT("the designer picks %s as the team's unlock mode"), *FGitSourceControlSettings::UnlockModeToString(Mode)),
+			[Session, Mode]() { return Session->SelectUnlockMode(Mode); });
 	}
 
 	void MergeOnServer(const TSharedRef<FGitE2ESession>& Session, EMergeMethod Method)
 	{
-		GitE2E::Do(Session, [Session, Method]() { return Session->MergePullRequestOnServer(Method); });
+		GitE2E::Do(Session, TEXT("the host merges the pull request"), [Session, Method]() { return Session->MergePullRequestOnServer(Method); });
 	}
 
 	void WaitUntilFreeOnServer(const TSharedRef<FGitE2ESession>& Session)
@@ -98,7 +99,7 @@ bool FShould_ReleaseLock_When_GitClientFetchesSquashMerge::RunTest(const FString
 	GitAutoUnlockE2ETests::MergeOnServer(Session, GitAutoUnlockE2ETests::EMergeMethod::Squash);
 
 	// Act: the designer fetches from Fork, the editor plays no part.
-	GitE2E::Do(Session, [Session]() { return Session->FetchFromGitClient(); });
+	GitE2E::Do(Session, TEXT("the designer fetches from Fork"), [Session]() { return Session->FetchFromGitClient(); });
 
 	// Assert
 	GitAutoUnlockE2ETests::WaitUntilFreeOnServer(Session);
@@ -121,7 +122,7 @@ bool FShould_ReleaseLock_When_GitClientFetchesRebaseMerge::RunTest(const FString
 	GitAutoUnlockE2ETests::MergeOnServer(Session, GitAutoUnlockE2ETests::EMergeMethod::Rebase);
 
 	// Act
-	GitE2E::Do(Session, [Session]() { return Session->FetchFromGitClient(); });
+	GitE2E::Do(Session, TEXT("the designer fetches from Fork"), [Session]() { return Session->FetchFromGitClient(); });
 
 	// Assert
 	GitAutoUnlockE2ETests::WaitUntilFreeOnServer(Session);
@@ -140,12 +141,14 @@ bool FShould_KeepLock_When_WorkIsPushedTwiceButNotMerged::RunTest(const FString&
 	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
 	GitE2E::Start(Session, 1);
 
-	// Act: the designer pushes the branch, pushes a second edit, then refreshes; the pull request stays open.
+	// Act: the designer pushes the branch, pushes a second edit, then refreshes; the pull request stays open while main moves on.
 	GitAutoUnlockE2ETests::LockEditAndPush(Session);
 	GitAutoUnlockE2ETests::EditAndPushAgain(Session);
+	GitE2E::Do(Session, TEXT("unrelated work lands on main"), [Session]() { return Session->AdvanceBaseOnServer(); });
 	GitE2E::Refresh(Session);
 
-	// Assert
+	// Assert: the refresh really fetched main before the lock is checked.
+	GitAutoUnlockE2ETests::WaitUntilFetched(Session, TEXT("main"));
 	GitAutoUnlockE2ETests::KeepsLockOf(Session, TEXT("Designer"));
 	GitE2E::Finish(Session);
 	return true;
@@ -163,7 +166,7 @@ bool FShould_KeepLock_When_AssetHasLocalEditAfterMerge::RunTest(const FString& P
 	GitE2E::Start(Session, 1);
 	GitAutoUnlockE2ETests::LockEditAndPush(Session);
 	GitAutoUnlockE2ETests::MergeOnServer(Session, GitAutoUnlockE2ETests::EMergeMethod::Merge);
-	GitE2E::Do(Session, [Session]() { return Session->EditAndSave(Session->Assets[0], 9.0f); });
+	GitE2E::Do(Session, TEXT("the designer edits and saves after the merge"), [Session]() { return Session->EditAndSave(Session->Assets[0], 9.0f); });
 
 	// Act
 	GitE2E::Refresh(Session);
@@ -207,7 +210,33 @@ bool FShould_ReleaseLock_When_DesignerPushesExistingBranchInOnPushMode::RunTest(
 	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
 	GitE2E::Start(Session, 1);
 	GitAutoUnlockE2ETests::SelectUnlockMode(Session, EGitUnlockMode::OnPush);
-	GitE2E::Do(Session, [Session]() { return Session->StartFeatureBranch(); });
+	GitE2E::Do(Session, TEXT("the designer starts and pushes a feature branch"), [Session]() { return Session->StartFeatureBranch(); });
+
+	// Act
+	GitAutoUnlockE2ETests::LockEditAndPush(Session);
+
+	// Assert
+	GitAutoUnlockE2ETests::WaitUntilFreeOnServer(Session);
+	GitE2E::Finish(Session);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_ReleaseLockOnPushWithoutAsking_When_TeamAlreadyChoseOnPush,
+	"UEGitPlugin.E2E.Should_ReleaseLockOnPushWithoutAsking_When_TeamAlreadyChoseOnPush",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_ReleaseLockOnPushWithoutAsking_When_TeamAlreadyChoseOnPush::RunTest(const FString& Parameters)
+{
+	// Arrange: a teammate already committed OnPush in Config/DefaultEditor.ini before this designer connects.
+	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
+	GitE2E::Do(Session, TEXT("the project config holds the team's OnPush choice"),
+		[]() { return FGitSourceControlSettings::WriteProjectUnlockMode(EGitUnlockMode::OnPush); });
+	GitE2E::Start(Session, 1);
+	GitE2E::Check(Session, [this, Session]()
+	{
+		TestFalse(TEXT("The settings panel does not ask for the unlock mode again"), Session->OffersUnlockModeChoice());
+	});
 
 	// Act
 	GitAutoUnlockE2ETests::LockEditAndPush(Session);
@@ -274,8 +303,8 @@ bool FShould_KeepColleagueLock_When_ColleagueWorkIsMergedInOnMergeMode::RunTest(
 	// Arrange: default OnMerge mode; a colleague holds the lock and their work lands on main.
 	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
 	GitE2E::Start(Session, 1);
-	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
-	GitE2E::Do(Session, [Session]() { return Session->PublishColleagueVersionOnServer(Session->Assets[0], 7.0f, TEXT("main")); });
+	GitE2E::Do(Session, TEXT("the colleague locks the asset"), [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
+	GitE2E::Do(Session, TEXT("the colleague's version reaches main"), [Session]() { return Session->PublishColleagueVersionOnServer(Session->Assets[0], 7.0f, TEXT("main")); });
 
 	// Act
 	GitE2E::Refresh(Session);
@@ -299,11 +328,11 @@ bool FShould_KeepColleagueLock_When_ColleagueBranchIsFetchedInOnPushMode::RunTes
 	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
 	GitE2E::Start(Session, 1);
 	GitAutoUnlockE2ETests::SelectUnlockMode(Session, EGitUnlockMode::OnPush);
-	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
-	GitE2E::Do(Session, [Session, ColleagueBranch]() { return Session->PublishColleagueVersionOnServer(Session->Assets[0], 7.0f, ColleagueBranch); });
+	GitE2E::Do(Session, TEXT("the colleague locks the asset"), [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
+	GitE2E::Do(Session, TEXT("the colleague pushes their branch"), [Session, ColleagueBranch]() { return Session->PublishColleagueVersionOnServer(Session->Assets[0], 7.0f, ColleagueBranch); });
 
 	// Act
-	GitE2E::Do(Session, [Session]() { return Session->FetchFromGitClient(); });
+	GitE2E::Do(Session, TEXT("the designer fetches from Fork"), [Session]() { return Session->FetchFromGitClient(); });
 
 	// Assert
 	GitAutoUnlockE2ETests::WaitUntilFetched(Session, ColleagueBranch);

@@ -70,11 +70,11 @@ public:
 
 	explicit FGitE2ESession(FAutomationTestBase& InTest)
 		: Test(InTest)
-		, Repository(InTest, true, false)
+		, Repository(InTest, false)
 	{
 		FGitSourceControlSettings& Settings = FGitSourceControlModule::Get().AccessSettings();
 		SavedLfsUserName = Settings.GetLfsUserName();
-		SavedUnlockMode = Settings.GetUnlockMode();
+		bHadProjectConfig = FFileHelper::LoadFileToArray(SavedProjectConfig, *FGitSourceControlSettings::GetProjectConfigFile(), FILEREAD_Silent);
 		Settings.SetLfsUserName(FString());
 		PreviousDialogHandler = FCoreDelegates::ModalMessageDialog;
 		FCoreDelegates::ModalMessageDialog.BindRaw(this, &FGitE2ESession::AnswerDialog);
@@ -348,6 +348,20 @@ public:
 		return RunGitOnServer(FString::Printf(TEXT("update-ref refs/heads/main %s"), *Base));
 	}
 
+	/** A colleague merges unrelated work into main: a commit the designer's next fetch must receive, touching none of the scenario's assets. */
+	bool AdvanceBaseOnServer()
+	{
+		FString Base;
+		if (!RunGitOnServer(TEXT("rev-parse main"), Base)
+			|| !RunGitOnServer(FString::Printf(TEXT("-c user.name=Host -c user.email=host@example.invalid commit-tree %s^{tree} -p %s -m \"Unrelated work\""), *Base, *Base), Base)
+			|| !RunGitOnServer(FString::Printf(TEXT("update-ref refs/heads/main %s"), *Base)))
+		{
+			return false;
+		}
+		ExpectedServerCommits.Add(TEXT("main"), Base);
+		return true;
+	}
+
 	/** Fetch from the designer's Git client, with the editor not involved. */
 	bool FetchFromGitClient()
 	{
@@ -375,38 +389,29 @@ public:
 		return Repository.RunGitAs(TEXT("Colleague"), FString::Printf(TEXT("lfs unlock \"%s\""), *Asset.RelativeFile));
 	}
 
-	/** Picks an Unlock Mode in the plugin settings panel with the keyboard: arrows on the closed combo box. */
+	/** Whether the plugin settings panel asks for the team's Unlock Mode, as it does for the first team member only. */
+	bool OffersUnlockModeChoice() const
+	{
+		return FindUnlockModeComboBox(FGitSourceControlModule::Get().GetProvider().MakeSettingsWidget()).IsValid();
+	}
+
+	/** The first team member opens the Unlock Mode list of the plugin settings panel and clicks a mode. */
 	bool SelectUnlockMode(EGitUnlockMode Mode)
 	{
 		const TSharedRef<SWidget> Panel = FGitSourceControlModule::Get().GetProvider().MakeSettingsWidget();
 		const TSharedPtr<SComboBox<TSharedPtr<EGitUnlockMode>>> ComboBox = FindUnlockModeComboBox(Panel);
 		if (!ComboBox.IsValid())
 		{
-			Test.AddError(TEXT("The settings panel has no Unlock Mode combo box"));
+			Test.AddError(TEXT("The settings panel has no Unlock Mode list to choose from"));
 			return false;
 		}
-		// Slate dispatches key presses through the public SWidget interface; SComboBox narrows the override to protected.
-		const TSharedRef<SWidget> FocusedWidget = ComboBox.ToSharedRef();
-		const auto PressKey = [&FocusedWidget](const FKey& Key)
+		// The list starts empty so the team makes an explicit choice, and SComboBox ignores arrow keys without a selection:
+		// a headless editor opens no drop-down, so the click on the option is applied as Slate applies it.
+		ComboBox->SetSelectedItem(MakeShared<EGitUnlockMode>(Mode));
+		EGitUnlockMode SavedMode;
+		if (!FGitSourceControlSettings::ReadProjectUnlockMode(SavedMode) || SavedMode != Mode)
 		{
-			FocusedWidget->OnKeyDown(FGeometry(), FKeyEvent(Key, FModifierKeysState(), 0, false, 0, 0));
-		};
-		const auto IsSelected = [&ComboBox, Mode]()
-		{
-			const TSharedPtr<EGitUnlockMode> Selected = ComboBox->GetSelectedItem();
-			return Selected.IsValid() && *Selected == Mode;
-		};
-		for (int32 Press = 0; Press < 3; ++Press)
-		{
-			PressKey(EKeys::Up);
-		}
-		for (int32 Press = 0; Press < 3 && !IsSelected(); ++Press)
-		{
-			PressKey(EKeys::Down);
-		}
-		if (!IsSelected())
-		{
-			Test.AddError(TEXT("The Unlock Mode combo box never reached the requested mode"));
+			Test.AddError(FString::Printf(TEXT("%s is not saved for the team in %s"), *FGitSourceControlSettings::UnlockModeToString(Mode), *FGitSourceControlSettings::GetProjectConfigFile()));
 			return false;
 		}
 		return true;
@@ -553,13 +558,18 @@ public:
 		}
 		Repository.RunGitQuietly(TEXT("fetch --quiet origin main"));
 		Repository.RunGitQuietly(TEXT("merge --quiet --ff-only origin/main"));
-		FGitSourceControlSettings& Settings = FGitSourceControlModule::Get().AccessSettings();
-		Settings.SetLfsUserName(SavedLfsUserName);
-		if (Settings.SetUnlockMode(SavedUnlockMode))
+		FGitSourceControlModule::Get().AccessSettings().SetLfsUserName(SavedLfsUserName);
+		// The team's unlock mode lives in the project: the next scenario starts from the project as it was.
+		const FString ProjectConfig = FGitSourceControlSettings::GetProjectConfigFile();
+		if (bHadProjectConfig)
 		{
-			Settings.SaveSettings();
-			FGitSourceControlModule::Get().GetProvider().SyncUnlockHook();
+			FFileHelper::SaveArrayToFile(SavedProjectConfig, *ProjectConfig);
 		}
+		else
+		{
+			IFileManager::Get().Delete(*ProjectConfig);
+		}
+		FGitSourceControlModule::Get().GetProvider().SyncUnlockHook();
 	}
 
 	FAutomationTestBase& Test;
@@ -677,7 +687,8 @@ private:
 	TArray<EAppReturnType::Type> DialogAnswers;
 	TDelegate<EAppReturnType::Type(EAppMsgCategory, EAppMsgType::Type, const FText&, const FText&)> PreviousDialogHandler;
 	FString SavedLfsUserName;
-	EGitUnlockMode SavedUnlockMode = EGitUnlockMode::OnMerge;
+	TArray<uint8> SavedProjectConfig;
+	bool bHadProjectConfig = false;
 	FString FeatureBranch;
 	/** Branches this scenario created on the server, deleted on tear down. */
 	TArray<FString> ServerBranches;
@@ -692,13 +703,28 @@ private:
 /** Latent steps run one per editor frame, so asynchronous operations and the provider tick progress between them. */
 namespace GitE2E
 {
-	inline void Do(const TSharedRef<FGitE2ESession>& Session, TFunction<bool()> Action)
+	/** A step returning false fails the test even when it reported nothing, so later steps never run against a broken arrangement. */
+	inline void Do(const TSharedRef<FGitE2ESession>& Session, const FString& What, TFunction<bool()> Action)
 	{
-		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Session, Action]()
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Session, What, Action]()
 		{
 			if (!Session->bFailed && !Action())
 			{
+				Session->Test.AddError(FString::Printf(TEXT("Step failed: %s\n%s"), *What, *Session->Describe()));
 				Session->bFailed = true;
+			}
+			return true;
+		}));
+	}
+
+	/** Runs assertions once the scenario reached this point; skipped when an earlier step already failed. */
+	inline void Check(const TSharedRef<FGitE2ESession>& Session, TFunction<void()> Assertions)
+	{
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Session, Assertions]()
+		{
+			if (!Session->bFailed)
+			{
+				Assertions();
 			}
 			return true;
 		}));
@@ -748,9 +774,9 @@ namespace GitE2E
 	/** Connects the provider like a designer, then commits and pushes the given number of fresh assets. */
 	inline void Start(const TSharedRef<FGitE2ESession>& Session, int32 AssetCount)
 	{
-		Do(Session, [Session]() { return Session->Connect(); });
+		Do(Session, TEXT("the designer selects the Git LFS 2 provider"), [Session]() { return Session->Connect(); });
 		WaitUntil(Session, TEXT("the Git LFS 2 provider is connected with LFS locking"), [Session]() { return Session->IsReady(); });
-		Do(Session, [Session, AssetCount]()
+		Do(Session, TEXT("the scenario commits and pushes fresh assets"), [Session, AssetCount]()
 		{
 			bool bCreated = true;
 			for (int32 Index = 0; Index < AssetCount && bCreated; ++Index)
@@ -765,10 +791,10 @@ namespace GitE2E
 	inline void CheckOutFromContentBrowser(const TSharedRef<FGitE2ESession>& Session, int32 AssetIndex)
 	{
 		TSharedRef<UToolMenu*> Menu = MakeShared<UToolMenu*>(nullptr);
-		Do(Session, [Session, AssetIndex, Menu]() { *Menu = Session->OpenAssetRevisionControlMenu({ Session->Assets[AssetIndex] }); return *Menu != nullptr; });
+		Do(Session, TEXT("the designer opens the asset revision control menu"), [Session, AssetIndex, Menu]() { *Menu = Session->OpenAssetRevisionControlMenu({ Session->Assets[AssetIndex] }); return *Menu != nullptr; });
 		WaitUntil(Session, TEXT("Check Out is available in the asset menu"),
 			[Menu]() { return FGitE2ESession::CanClick(FGitE2ESession::FindEntry(*Menu, "SCCCheckOut")); });
-		Do(Session, [Session, Menu]() { return Session->Click(FGitE2ESession::FindEntry(*Menu, "SCCCheckOut")); });
+		Do(Session, TEXT("the designer clicks Check Out"), [Session, Menu]() { return Session->Click(FGitE2ESession::FindEntry(*Menu, "SCCCheckOut")); });
 		WaitUntil(Session, TEXT("the asset is checked out"), [Session, AssetIndex]()
 		{
 			const FSourceControlStatePtr State = Session->GetState(Session->Assets[AssetIndex]);
@@ -779,7 +805,7 @@ namespace GitE2E
 	/** Revision Control > Git > Refresh. */
 	inline void Refresh(const TSharedRef<FGitE2ESession>& Session)
 	{
-		Do(Session, [Session]()
+		Do(Session, TEXT("the designer clicks Refresh"), [Session]()
 		{
 			return Session->Click(FGitE2ESession::FindEntry(Session->OpenRevisionControlMenu(), "GitRefresh"));
 		});

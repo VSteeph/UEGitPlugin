@@ -17,19 +17,17 @@
 class FGitTestRepository
 {
 public:
-	/** @param bConnect false leaves the connection to the caller, such as an E2E test selecting the provider like a user. */
-	explicit FGitTestRepository(FAutomationTestBase& InTest, bool bUseLfsLocking = false, bool bConnect = true)
+	/**
+	 * LFS locking follows the repository, as for a user: it is on only when the lockable attributes exist before connecting.
+	 * @param bConnect false leaves the connection to the caller, such as an E2E test selecting the provider like a user.
+	 */
+	explicit FGitTestRepository(FAutomationTestBase& InTest, bool bConnect = true)
 		: Test(InTest)
 	{
 		FGitSourceControlModule& Module = FGitSourceControlModule::Get();
-		bWasUsingLocking = Module.AccessSettings().IsUsingGitLfsLocking();
 		if (bConnect)
 		{
-			Connect(bUseLfsLocking);
-		}
-		else
-		{
-			Module.AccessSettings().SetUsingGitLfsLocking(bUseLfsLocking);
+			Module.GetProvider().CheckGitAvailability();
 		}
 		RepositoryRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 		GitBinary = Module.GetProvider().GetGitBinaryPath();
@@ -41,12 +39,6 @@ public:
 		// An interrupted earlier run can leave the checkout behind the remote, which would reject this scenario's pushes.
 		RunGitQuietly(TEXT("fetch --quiet origin main"));
 		RunGitQuietly(TEXT("merge --quiet --ff-only origin/main"));
-	}
-
-	~FGitTestRepository()
-	{
-		// Restores the setting only: reconnecting with it would require the lockable attributes the test removed.
-		FGitSourceControlModule::Get().AccessSettings().SetUsingGitLfsLocking(bWasUsingLocking);
 	}
 
 	bool IsAvailable() const
@@ -148,13 +140,5 @@ public:
 	FString GitBinary;
 
 private:
-	static void Connect(bool bUseLfsLocking)
-	{
-		FGitSourceControlModule& Module = FGitSourceControlModule::Get();
-		Module.AccessSettings().SetUsingGitLfsLocking(bUseLfsLocking);
-		Module.GetProvider().CheckGitAvailability();
-	}
-
 	FAutomationTestBase& Test;
-	bool bWasUsingLocking = false;
 };
