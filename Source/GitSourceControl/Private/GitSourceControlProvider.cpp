@@ -49,8 +49,6 @@ void FGitSourceControlProvider::Init(bool bForceConnection)
 		CheckGitAvailability();
 	}
 
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	AssetRegistryModule.Get().OnAssetRenamed().AddStatic(&GitSourceControlUtils::UpdateStateOnAssetRename);	
 
 	// bForceConnection: not used anymore
 }
@@ -84,8 +82,6 @@ void FGitSourceControlProvider::CheckGitAvailability()
 void FGitSourceControlProvider::UpdateSettings()
 {
 	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
-	bUsingGitLfsLocking = GitSourceControl.AccessSettings().IsUsingGitLfsLocking();
-
 	FString ConfiguredLockUser = GitSourceControl.AccessSettings().GetLfsUserName();
 	// Runs on the connection thread as well as the game thread, where the detected name is applied.
 	FScopeLock Lock(&LockUserCriticalSection);
@@ -102,8 +98,7 @@ void FGitSourceControlProvider::SyncUnlockHook() const
 	{
 		return;
 	}
-	const FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
-	const EGitUnlockMode UnlockMode = GitSourceControl.AccessSettings().GetUnlockMode();
+	const EGitUnlockMode UnlockMode = FGitSourceControlSettings::GetUnlockMode();
 	// Git only runs the reference-transaction hook since 2.28: older versions silently never auto-unlock.
 	const bool bGitSupportsHook = GitVersion.Major > 2 || (GitVersion.Major == 2 && GitVersion.Minor >= 28);
 	if (UnlockMode != EGitUnlockMode::None && !bGitSupportsHook)
@@ -154,14 +149,12 @@ void FGitSourceControlProvider::CheckRepositoryStatus()
 
 	// Find the path to the root Git directory (if any, else uses the ProjectDir)
 	const FString PathToProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	PathToRepositoryRoot = PathToProjectDir;
-	if (!GitSourceControlUtils::FindRootDirectory(PathToProjectDir, PathToGitRoot))
+	if (!GitSourceControlUtils::FindRootDirectory(PathToProjectDir, PathToRepositoryRoot))
 	{
 		UE_LOG(LogSourceControl, Error, TEXT("Failed to find valid Git root directory."));
 		bGitRepositoryFound = false;
 		return;
 	}
-	PathToRepositoryRoot = PathToGitRoot;
 
 	if (!GitSourceControlUtils::CheckGitAvailability(PathToGitBinary, &GitVersion))
 	{
@@ -198,27 +191,18 @@ void FGitSourceControlProvider::CheckRepositoryStatus()
 			}
 			GitSourceControlUtils::GetRemoteBranchName(PathToGitBinary, PathToRepositoryRoot, RemoteBranchName);
 			GitSourceControlUtils::GetRemoteUrl(PathToGitBinary, PathToRepositoryRoot, RemoteUrl);
-			const TArray<FString> Files{TEXT("*.uasset"), TEXT("*.umap")};
-			TArray<FString> LockableErrorMessages;
-			if (!GitSourceControlUtils::CheckLFSLockable(PathToGitBinary, PathToRepositoryRoot, Files, LockableErrorMessages))
+			FString LfsProblem;
+			bUsingGitLfsLocking = GitSourceControlUtils::CheckLfsLocking(PathToGitBinary, PathToRepositoryRoot, LfsProblem);
+			if (!bUsingGitLfsLocking)
 			{
-				for (const auto &ErrorMessage : LockableErrorMessages)
+				// Without locks the plugin still shows Git states, but nothing stops two people editing the same asset.
+				AsyncTask(ENamedThreads::GameThread, [LfsProblem]()
 				{
-					UE_LOG(LogSourceControl, Error, TEXT("%s"), *ErrorMessage);
-				}
-			}
-			else if (bUsingGitLfsLocking)
-			{
-				if (!GitSourceControlUtils::IsFileLFSLockable(".umap")
-					|| !GitSourceControlUtils::IsFileLFSLockable(".uasset"))
-				{
-					UE_LOG(LogSourceControl, Error, TEXT("Git LFS Locking is disabled. Files .uasset or .umap are not lockable. Make sure your .gitattributes is setting lockable attributes for .uasset or .umap at the root of the git repository."));
-					bUsingGitLfsLocking = false;
-				}
-				else
-				{
-					UE_LOG(LogSourceControl, Log, TEXT("Git LFS Locking is enabled."));
-				}
+					const FText Warning = FText::Format(LOCTEXT("LfsLockingDisabled", "Please activate and/or configure Git LFS: asset locking is disabled. {0}"), FText::FromString(LfsProblem));
+					FMessageLog SourceControlLog("SourceControl");
+					SourceControlLog.Warning(Warning);
+					SourceControlLog.Notify(Warning, EMessageSeverity::Warning, true);
+				});
 			}
 
 			if (bUsingGitLfsLocking)
@@ -507,7 +491,6 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 	}
 
 	FGitSourceControlCommand* Command = new FGitSourceControlCommand(InOperation, Worker.ToSharedRef());
-	Command->UpdateRepositoryRootIfSubmodule(AbsoluteFiles);
 	Command->Files = AbsoluteFiles;
 	Command->OperationCompleteDelegate = InOperationCompleteDelegate;
 	
@@ -877,96 +860,26 @@ ECommandResult::Type FGitSourceControlProvider::IssueCommand(FGitSourceControlCo
 	}
 }
 
+// Outdated assets are detected against the base and upstream branches only: engine status branches are not supported.
 bool FGitSourceControlProvider::QueryStateBranchConfig(const FString& ConfigSrc, const FString& ConfigDest)
 {
-	// Check similar preconditions to Perforce (valid src and dest),
-	if (ConfigSrc.Len() == 0 || ConfigDest.Len() == 0)
-	{
-		return false;
-	}
-
-	if (!bGitAvailable || !bGitRepositoryFound)
-	{
-		FTSMessageLog("SourceControl").Error(LOCTEXT("StatusBranchConfigNoConnection", "Unable to retrieve status branch configuration from repo, no connection"));
-		return false;
-	}
-
-	// Otherwise, we can assume that whatever our user is doing to config state branches is properly synced, so just copy.
-	// TODO: maybe don't assume, and use git show instead?
-	IFileManager::Get().Copy(*ConfigDest, *ConfigSrc);
-	return true;
+	return false;
 }
 
 void FGitSourceControlProvider::RegisterStateBranches(const TArray<FString>& BranchNames, const FString& ContentRootIn)
 {
-	StatusBranchNamePatternsInternal = BranchNames;
 }
 
 #if ENGINE_MINOR_VERSION >= 7
 bool FGitSourceControlProvider::GetStateBranchAtIndex(int32 BranchIndex, FString& OutBranchName) const
 {
-	auto StatusBranchNames = GetStatusBranchNames();
-
-	if (StatusBranchNames.IsValidIndex(BranchIndex))
-	{
-		OutBranchName = StatusBranchNames[BranchIndex];
-		return true;
-	}
 	return false;
 }
 #endif
 
 int32 FGitSourceControlProvider::GetStateBranchIndex(const FString& StateBranchName) const
 {
-	// How do state branches indices work?
-	// Order matters. Lower values are lower in the hierarchy, i.e., changes from higher branches get automatically merged down.
-	// The higher branch is, the stabler it is, and has changes manually promoted up.
-
-	// Check if we are checking the index of the current branch
-	// UE uses FEngineVersion for the current branch name because of UEGames setup, but we want to handle otherwise for Git repos.
-	auto StatusBranchNames = GetStatusBranchNames();
-	if (StateBranchName == FEngineVersion::Current().GetBranch())
-	{
-		const int32 CurrentBranchStatusIndex = StatusBranchNames.IndexOfByKey(BranchName);
-		const bool bCurrentBranchInStatusBranches = CurrentBranchStatusIndex != INDEX_NONE;
-		// If the user's current branch is tracked as a status branch, give the proper index
-		if (bCurrentBranchInStatusBranches)
-		{
-			return CurrentBranchStatusIndex;
-		}
-		// If the current branch is not a status branch, make it the highest branch
-		// This is semantically correct, since if a branch is not marked as a status branch
-		// it merges changes in a similar fashion to the highest status branch, i.e. manually promotes them
-		// based on the user merging those changes in. and these changes always get merged from even the highest point
-		// of the stream. i.e, promoted/stable changes are always up for consumption by this branch.
-		return INT32_MAX;
-	}
-
-	// If we're not checking the current branch, then we don't need to do special handling.
-	// If it is not a status branch, there is no message
-	return StatusBranchNames.IndexOfByKey(StateBranchName);
-}
-
-TArray<FString> FGitSourceControlProvider::GetStatusBranchNames() const
-{
-	TArray<FString> StatusBranches;
-	if (PathToGitBinary.IsEmpty() || PathToRepositoryRoot.IsEmpty())
-		return StatusBranches;
-	
-	for (int i = 0; i < StatusBranchNamePatternsInternal.Num(); i++)
-	{
-		TArray<FString> Matches;
-		bool bResult = GitSourceControlUtils::GetRemoteBranchesWildcard(PathToGitBinary, PathToRepositoryRoot, StatusBranchNamePatternsInternal[i], Matches);
-		if (bResult && Matches.Num() > 0)
-		{
-			for (int j = 0; j < Matches.Num(); j++)
-			{
-				StatusBranches.Add(Matches[j].TrimStartAndEnd());	
-			}
-		}
-	}
-	
-	return StatusBranches;
+	return INDEX_NONE;
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -72,6 +72,30 @@ bool FShould_KeepLock_When_RevertingChangesOfLockedAsset::RunTest(const FString&
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_RestoreAsset_When_RevertingDeletedCommittedAsset,
+	"UEGitPlugin.Integration.Should_RestoreAsset_When_RevertingDeletedCommittedAsset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_RestoreAsset_When_RevertingDeletedCommittedAsset::RunTest(const FString& Parameters)
+{
+	// Arrange: a committed asset deleted from disk, the deletion not staged.
+	FGitLockScenario Scenario(*this);
+	if (!Scenario.Prepare() || !TestTrue(TEXT("The asset is deleted"), IFileManager::Get().Delete(*Scenario.AbsoluteAsset, false, true)))
+	{
+		return false;
+	}
+
+	// Act
+	const TArray<FString> Errors = Scenario.Execute(ISourceControlOperation::Create<FRevert>());
+
+	// Assert
+	TestTrue(FString::Printf(TEXT("Revert succeeds: %s"), *FString::Join(Errors, TEXT(" | "))), Errors.IsEmpty());
+	TestEqual(TEXT("The committed asset is back on disk"), Scenario.ReadAsset(), FString(FGitLockScenario::BaseContent));
+	TestEqual(TEXT("No deletion is staged"), Scenario.Repository.RunGitQuietly(TEXT("diff --cached --quiet")), 0);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FShould_ReleaseLock_When_RevertingAndUnlockingLockedAsset,
 	"UEGitPlugin.Integration.Should_ReleaseLock_When_RevertingAndUnlockingLockedAsset",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

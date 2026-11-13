@@ -18,10 +18,7 @@ bool FShould_ReturnEachAssetRevision_When_PathsShareTheSameFilename::RunTest(con
 {
 	FGitSourceControlModule& Module = FGitSourceControlModule::Get();
 	FGitSourceControlProvider& Provider = Module.GetProvider();
-	const bool bWasUsingLocking = Module.AccessSettings().IsUsingGitLfsLocking();
-	Module.AccessSettings().SetUsingGitLfsLocking(false);
 	Provider.CheckGitAvailability();
-	Module.AccessSettings().SetUsingGitLfsLocking(bWasUsingLocking);
 	const FString RepositoryRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	const FString GitBinary = Provider.GetGitBinaryPath();
 	if (!TestFalse(TEXT("Git is available"), GitBinary.IsEmpty()))

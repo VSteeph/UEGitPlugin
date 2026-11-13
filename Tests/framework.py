@@ -43,10 +43,6 @@ PLUGIN_FILES = (
     "Source",
     "Resources",
     "LICENSE.txt",
-    "git-lfs.exe",
-    "git-lfs",
-    "git-lfs-mac-amd64",
-    "git-lfs-mac-arm64",
 )
 
 

@@ -6,6 +6,7 @@
 #include "GitSourceControlSettings.h"
 
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "SourceControlHelpers.h"
 
 namespace GitSettingsConstants
@@ -13,6 +14,10 @@ namespace GitSettingsConstants
 
 /** The section of the ini file we load our settings from */
 static const FString SettingsSection = TEXT("GitSourceControl.GitSourceControlSettings");
+
+/** Section of the project's DefaultEditor.ini holding settings shared by the whole team */
+static const TCHAR* ProjectSection = TEXT("GitSourceControl");
+static const TCHAR* UnlockModeKey = TEXT("UnlockMode");
 
 }
 
@@ -33,22 +38,6 @@ bool FGitSourceControlSettings::SetBinaryPath(const FString& InString)
 	return bChanged;
 }
 
-/** Tell if using the Git LFS file Locking workflow */
-bool FGitSourceControlSettings::IsUsingGitLfsLocking() const
-{
-	FScopeLock ScopeLock(&CriticalSection);
-	return bUsingGitLfsLocking;
-}
-
-/** Configure the usage of Git LFS file Locking workflow */
-bool FGitSourceControlSettings::SetUsingGitLfsLocking(const bool InUsingGitLfsLocking)
-{
-	FScopeLock ScopeLock(&CriticalSection);
-	const bool bChanged = (bUsingGitLfsLocking != InUsingGitLfsLocking);
-	bUsingGitLfsLocking = InUsingGitLfsLocking;
-	return bChanged;
-}
-
 const FString FGitSourceControlSettings::GetLfsUserName() const
 {
 	FScopeLock ScopeLock(&CriticalSection);
@@ -66,21 +55,33 @@ bool FGitSourceControlSettings::SetLfsUserName(const FString& InString)
 	return bChanged;
 }
 
-EGitUnlockMode FGitSourceControlSettings::GetUnlockMode() const
+FString FGitSourceControlSettings::GetProjectConfigFile()
 {
-	FScopeLock ScopeLock(&CriticalSection);
+	return FPaths::ConvertRelativePathToFull(FPaths::ProjectConfigDir() / TEXT("DefaultEditor.ini"));
+}
+
+bool FGitSourceControlSettings::ReadProjectUnlockMode(EGitUnlockMode& OutUnlockMode)
+{
+	FConfigFile ProjectConfig;
+	ProjectConfig.Read(GetProjectConfigFile());
+	FString Value;
+	return ProjectConfig.GetString(GitSettingsConstants::ProjectSection, GitSettingsConstants::UnlockModeKey, Value)
+		&& ParseUnlockMode(Value, OutUnlockMode);
+}
+
+EGitUnlockMode FGitSourceControlSettings::GetUnlockMode()
+{
+	EGitUnlockMode UnlockMode = EGitUnlockMode::OnMerge;
+	ReadProjectUnlockMode(UnlockMode);
 	return UnlockMode;
 }
 
-bool FGitSourceControlSettings::SetUnlockMode(EGitUnlockMode InUnlockMode)
+bool FGitSourceControlSettings::WriteProjectUnlockMode(EGitUnlockMode InUnlockMode)
 {
-	FScopeLock ScopeLock(&CriticalSection);
-	const bool bChanged = (UnlockMode != InUnlockMode);
-	if (bChanged)
-	{
-		UnlockMode = InUnlockMode;
-	}
-	return bChanged;
+	// Only this key changes: the rest of the team's file keeps its layout and comments.
+	FConfigFile Change;
+	Change.SetString(GitSettingsConstants::ProjectSection, GitSettingsConstants::UnlockModeKey, *UnlockModeToString(InUnlockMode));
+	return Change.UpdateSinglePropertyInSection(*GetProjectConfigFile(), GitSettingsConstants::UnlockModeKey, GitSettingsConstants::ProjectSection);
 }
 
 FString FGitSourceControlSettings::UnlockModeToString(EGitUnlockMode InUnlockMode)
@@ -127,16 +128,6 @@ void FGitSourceControlSettings::LoadSettings()
 	const FString& IniFile = SourceControlHelpers::GetSettingsIni();
 	GConfig->GetString(*GitSettingsConstants::SettingsSection, TEXT("BinaryPath"), BinaryPath, IniFile);
 	GConfig->GetString(*GitSettingsConstants::SettingsSection, TEXT("LfsUserName"), LfsUserName, IniFile);
-
-	FString UnlockModeString;
-	if (GConfig->GetString(*GitSettingsConstants::SettingsSection, TEXT("UnlockMode"), UnlockModeString, IniFile))
-	{
-		ParseUnlockMode(UnlockModeString, UnlockMode);
-	}
-	else
-	{
-		UnlockMode = EGitUnlockMode::OnMerge;
-	}
 }
 
 void FGitSourceControlSettings::SaveSettings() const
@@ -145,6 +136,5 @@ void FGitSourceControlSettings::SaveSettings() const
 	const FString& IniFile = SourceControlHelpers::GetSettingsIni();
 	GConfig->SetString(*GitSettingsConstants::SettingsSection, TEXT("BinaryPath"), *BinaryPath, IniFile);
 	GConfig->SetString(*GitSettingsConstants::SettingsSection, TEXT("LfsUserName"), *LfsUserName, IniFile);
-	GConfig->SetString(*GitSettingsConstants::SettingsSection, TEXT("UnlockMode"), *UnlockModeToString(UnlockMode), IniFile);
 	GConfig->Flush(false, IniFile);
 }

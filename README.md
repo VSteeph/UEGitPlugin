@@ -1,4 +1,4 @@
-# UEGitPlugin — Lock Manager
+# UEGitPlugin - Lock Manager
 
 A lightweight Unreal Engine 5 fork of [Project Borealis's UEGitPlugin](https://github.com/ProjectBorealis/UEGitPlugin) focused solely on **Git LFS locking/unlocking** and **asset status tracking** in a team environment.
 
@@ -8,14 +8,16 @@ All Git operations (branches, commits, pushes, pulls, merges) must be done in an
 
 ## Prerequisites
 
-* **Unreal Engine 5** (UE4 is not supported).
-* **Git** and **Git LFS** installed and authenticated (HTTPS with [Git Credential Manager](https://github.com/GitCredentialManager/git-credential-manager) recommended).
+* **Unreal Engine 5.6 or 5.8**.
+* **Git 2.28 or newer** (automatic unlock relies on the `reference-transaction` hook) and **Git LFS** installed and authenticated (HTTPS with [Git Credential Manager](https://github.com/GitCredentialManager/git-credential-manager) recommended).
 * `*.uasset` and `*.umap` marked `lockable` in your repository root `.gitattributes`:
 
 ```gitattributes
 *.uasset filter=lfs diff=lfs merge=lfs -text lockable
 *.umap filter=lfs diff=lfs merge=lfs -text lockable
 ```
+
+If Git LFS is missing or the assets are not `lockable`, the plugin still connects but warns at connection ("Please activate and/or configure Git LFS") and asset locking stays disabled until it is fixed.
 
 ## Installation
 
@@ -30,24 +32,28 @@ All Git operations (branches, commits, pushes, pulls, merges) must be done in an
 4. **LFS Username** is pre-filled with the lock owner name reported by your Git host once the plugin has seen one of your locks, otherwise with your local Git `user.name`.
    Make sure it matches the lock owner name reported by your Git host (for example, your GitHub/GitLab username if it differs from your Git display name).
    The pre-filled value is only saved once you confirm the field.
-5. Choose the **Unlock Mode** (`OnMerge` by default, `OnPush`, or `None`).
+5. **Unlock Mode** is a team choice (see [Unlock Mode](#unlock-mode)).
+   The first team member to connect picks it in this window; it is then saved in `Config/DefaultEditor.ini`, which they commit.
+   Everyone else sees the team's choice here and is never asked again.
 6. Click **Accept Settings**.
 
 ## Configuration Options
 
-### Unreal Editor (`Config/DefaultEditorPerProjectUserSettings.ini`)
-
-* **Disable automatic `git add` for new files** (recommended so your external Git client stays in control):
+### Unlock Mode (`Config/DefaultEditor.ini`, versioned)
 
 ```ini
-[/Script/UnrealEd.EditorLoadingSavingSettings]
-bSCCAutoAddNewFiles=False
+[GitSourceControl]
+UnlockMode=OnMerge
 ```
 
-### Extra Remote Branches Checked (`RegisterStateBranches`)
+Accepted values: `OnMerge`, `OnPush`, `None`.
+The plugin reads this file directly, so a per-user setting can never override the team's choice.
+When the key is missing, `OnMerge` applies until a team member picks a mode.
+After changing the value (or pulling a change to it), reconnect to Revision Control to update the Git hook.
 
-By default, the plugin automatically checks the repository's remote base branch (`origin/HEAD`, or `develop` / `dev` / `main` / `master`) and your current upstream branch (`@{u}`).  
-If you need extra branches checked (for example `origin/promoted`), call `ISourceControlProvider::RegisterStateBranches` from a custom `UUnrealEdEngine::Init` subclass.
+### Outdated Assets
+
+The plugin checks your assets against the repository's remote base branch (`origin/HEAD`, or `develop` / `dev` / `main` / `master`) and your current upstream branch (`@{u}`).
 
 # How to Use
 
@@ -56,7 +62,8 @@ If you need extra branches checked (for example `origin/promoted`), call `ISourc
 1. **Lock (`Check Out`):** Before editing an asset, check it out in Unreal. The plugin fetches the remote base and tracking branches, blocks if a teammate already holds the lock or if remote has a newer revision, and runs `git lfs lock`. Unlocked tracked files remain read-only on disk.
 2. **Revert:** Discard local modifications, with or without releasing the lock (see [Revert](#revert)).
 3. **Manual Unlock:** Use **Revert and Unlock**, or `git lfs unlock` from a terminal.
-4. **Unlock Mode:** Automatic unlock policy configured in the plugin settings and enforced by a managed Git `reference-transaction` hook (works even when Unreal is closed):
+4. <a id="unlock-mode"></a>**Unlock Mode:** Automatic unlock policy shared by the team in `Config/DefaultEditor.ini` and enforced by a managed Git `reference-transaction` hook.
+   The hook is installed in each clone when Unreal connects to Revision Control; it then also works when Unreal is closed.
    * `OnMerge` *(default)*: automatically unlocks files changed on the remote base branch when their local working copy is clean and identical.
    * `OnPush`: automatically unlocks files as soon as they reach any remote branch (seen by a push or a fetch) when their local working copy is clean and identical.
    * `None`: manual unlock only.
@@ -72,7 +79,7 @@ Hover the asset to see who holds the lock and since when.
 | *(none)* | Free: nobody holds a lock. |
 | ![Locked by you](Resources/Readme/LockSelf.png) | Locked by you: you can edit and save the asset. |
 | ![Locked by another user](Resources/Readme/LockOther.png) | Locked by another user: you cannot check it out. |
-| ![Outdated](Resources/Readme/Outdated.png) | Outdated: a newer version exists on your remote branch or on another branch (base branch, extra checked branches). Update before locking it. |
+| ![Outdated](Resources/Readme/Outdated.png) | Outdated: a newer version exists on your remote branch or on the base branch. Update before locking it. |
 | ![Locked by you, outdated](Resources/Readme/LockSelfOutdated.png) | Locked by you and outdated. |
 | ![Locked by another user, outdated](Resources/Readme/LockOtherOutdated.png) | Locked by another user and outdated. |
 
@@ -102,4 +109,5 @@ Both global actions ask for confirmation and are disabled when there is nothing 
 
 ## Removed from Original Plugin
 
-In-editor **Submit Content / Commit**, **Push**, **Pull / Sync**, **Changelists**, **auto-staging on save**, and **UE4 support** are intentionally removed.
+In-editor **Submit Content / Commit**, **Push**, **Pull / Sync**, **Changelists**, **staging** (`git add` / `git rm` on save, new asset, delete or rename), **conflict resolution**, **status branches**, the **`git` console command**, the **bundled Git LFS binaries** and **UE4 support** are intentionally removed.
+New, deleted and renamed assets show up in your Git client like any other change.

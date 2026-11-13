@@ -10,6 +10,8 @@
 #include "GitSourceControlMenu.h"
 #include "Runtime/Launch/Resources/Version.h"
 
+#include <atomic>
+
 class FGitSourceControlState;
 
 class FGitSourceControlCommand;
@@ -129,12 +131,6 @@ public:
 		return PathToRepositoryRoot;
 	}
 
-	/** Path to the root of the Git repository: can be the ProjectDir itself, or any parent directory (found by the "Connect" operation) */
-	inline const FString& GetPathToGitRoot() const
-	{
-		return PathToGitRoot;
-	}
-
 	/** Gets the path to the Git binary */
 	inline const FString& GetGitBinaryPath() const
 	{
@@ -206,8 +202,6 @@ public:
 
 	const FString& GetRemoteBranchName() const { return RemoteBranchName; }
 
-	TArray<FString> GetStatusBranchNames() const;
-
 	uint32 TicksUntilNextForcedUpdate = 0;
 
 private:
@@ -217,8 +211,8 @@ private:
 	/** Is git repository found. */
 	bool bGitRepositoryFound = false;
 
-	/** Is LFS locking enabled? */
-	bool bUsingGitLfsLocking = false;
+	/** Git LFS locking is on when Git LFS runs and the repository marks .uasset and .umap as lockable; set by the connection thread. */
+	std::atomic<bool> bUsingGitLfsLocking = false;
 
 	FString PathToGitBinary;
 
@@ -248,11 +242,8 @@ private:
 	/** Update repository status on Connect and UpdateStatus operations */
 	void UpdateRepositoryStatus(const class FGitSourceControlCommand& InCommand);
 
-	/** Path to the root of the Unreal revision control repository: usually the ProjectDir */
+	/** Path to the root of the Git repository: the ProjectDir itself, or any parent directory */
 	FString PathToRepositoryRoot;
-
-	/** Path to the root of the Git repository: can be the ProjectDir itself, or any parent directory (found by the "Connect" operation) */
-	FString PathToGitRoot;
 
 	/** Git config user.name (from local repository, else globally) */
 	FString UserName;
@@ -299,8 +290,5 @@ private:
 	*/
 	TArray<FString> IgnoreForceCache;
 
-	/** Array of branch name patterns for status queries */
-	TArray<FString> StatusBranchNamePatternsInternal;
-		
 	class FGitSourceControlRunner* Runner = nullptr;
 };

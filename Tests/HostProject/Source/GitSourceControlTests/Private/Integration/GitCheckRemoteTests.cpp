@@ -20,13 +20,13 @@ namespace GitCheckRemoteTests
 		FString AttributesFile;
 		TArray<FString> ExtraRemoteBranches;
 
-		explicit FScenario(FAutomationTestBase& Test)
+		explicit FScenario(FAutomationTestBase& Test, const TCHAR* AssetPrefix = TEXT("CheckRemote"))
 			: Repository(Test)
 		{
 			const FString Suffix = FGuid::NewGuid().ToString(EGuidFormats::Digits);
 			FeatureBranch = FString::Printf(TEXT("feature-%s"), *Suffix);
 			// Outside Content/ so the asset registry never tries to load this fake package.
-			RelativeAsset = FString::Printf(TEXT("Fixtures/CheckRemote-%s.uasset"), *Suffix);
+			RelativeAsset = FString::Printf(TEXT("Fixtures/%s-%s.uasset"), AssetPrefix, *Suffix);
 			AbsoluteAsset = FPaths::ConvertRelativePathToFull(Repository.RepositoryRoot, RelativeAsset);
 			AttributesFile = FPaths::Combine(Repository.RepositoryRoot, TEXT(".gitattributes"));
 		}
@@ -119,6 +119,33 @@ bool FShould_MarkAssetNotLatest_When_BaseHasDifferentContent::RunTest(const FStr
 
 	// Assert
 	TestTrue(TEXT("The asset changed by a colleague on the base branch is not latest"), State.State.RemoteState == ERemoteState::NotLatest);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_MarkAssetNotLatest_When_AccentedAssetChangedOnBase,
+	"UEGitPlugin.Integration.Should_MarkAssetNotLatest_When_AccentedAssetChangedOnBase",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_MarkAssetNotLatest_When_AccentedAssetChangedOnBase::RunTest(const FString& Parameters)
+{
+	// Arrange: a French team names its assets with accents; a colleague changed one on the base branch.
+	GitCheckRemoteTests::FScenario Scenario(*this, TEXT("Caf\u00e9-For\u00eat"));
+	FString ColleagueTree;
+	FString ColleagueCommit;
+	if (!Scenario.Prepare(TEXT("Feature content\n"))
+		|| !Scenario.Repository.MakeRemoteTreeWithFileContent(TEXT("main"), Scenario.RelativeAsset, TEXT("Colleague content\n"), ColleagueTree)
+		|| !Scenario.Repository.PublishTreeOnRemote(ColleagueTree, TEXT("main"), ColleagueCommit)
+		|| !Scenario.Repository.RunGit(TEXT("fetch --quiet origin main")))
+	{
+		return false;
+	}
+
+	// Act
+	const FGitSourceControlState State = Scenario.CheckAsset();
+
+	// Assert
+	TestTrue(TEXT("The accented asset changed by a colleague is not latest"), State.State.RemoteState == ERemoteState::NotLatest);
 	return !HasAnyErrors();
 }
 
