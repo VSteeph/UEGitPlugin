@@ -8,34 +8,10 @@
 #include "GitSourceControlRevision.h"
 #include "GitSourceControlState.h"
 #include "Runtime/Launch/Resources/Version.h"
-#if ENGINE_MAJOR_VERSION == 5
-#include "UObject/ObjectSaveContext.h"
-#endif
 
 class FGitSourceControlState;
 
 class FGitSourceControlCommand;
-
-/**
- * Helper struct for maintaining temporary files for passing to commands
- */
-class FGitScopedTempFile
-{
-public:
-
-	/** Constructor - open & write string to temp file */
-	FGitScopedTempFile(const FText& InText);
-
-	/** Destructor - delete temp file */
-	~FGitScopedTempFile();
-
-	/** Get the filename of this temp file - empty if it failed to be created */
-	const FString& GetFilename() const;
-
-private:
-	/** The filename we are writing to */
-	FString Filename;
-};
 
 struct FGitVersion;
 
@@ -201,18 +177,6 @@ void ReloadPackages(TArray<UPackage*>& InPackagesToReload);
 bool ListFilesInDirectoryRecurse(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const FString& InDirectory, TArray<FString>& OutFiles);
 
 /**
- * Run a Git "commit" command by batches.
- *
- * @param	InPathToGitBinary	The path to the Git binary
- * @param	InRepositoryRoot	The Git repository from where to run the command - usually the Game directory
- * @param	InParameter			The parameters to the Git commit command
- * @param	InFiles				The files to be operated on
- * @param	OutErrorMessages	Any errors (from StdErr) as an array per-line
- * @returns true if the command succeeded and returned no errors
- */
-bool RunCommit(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InParameters, const TArray<FString>& InFiles, TArray<FString>& OutResults, TArray<FString>& OutErrorMessages);
-
-/**
  * @brief Detects how to parse the result of a "status" command to get workspace file states
  *
  *  It is either a command for a whole directory (ie. "Content/", in case of "Submit to Revision Control" menu),
@@ -236,7 +200,7 @@ GITSOURCECONTROL_API void ParseStatusResults( const FString & InPathToGitBinary,
  * @param	OnePath				The file to be checked
  * @param	OutErrorMessages	Any errors (from StdErr) as an array per-line
  */
-void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& Files,
+GITSOURCECONTROL_API void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& Files,
 				 TArray<FString>& OutErrorMessages, TMap<FString, FGitSourceControlState>& OutStates);
 
 /**
@@ -253,24 +217,6 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 bool RunUpdateStatus(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const bool InUsingLfsLocking, const TArray<FString>& InFiles,
 					 TArray<FString>& OutErrorMessages, TMap<FString, FGitSourceControlState>& OutStates);
 
-#if ENGINE_MAJOR_VERSION == 5
-/**
- * Keep Consistency of being file staged
- *
- * @param	Filename			Saved filename
- * @param	Pkg					Package (for adapting delegate)
- * @param   ObjectSaveContext	Context for save (for adapting delegate)
- */
-void UpdateFileStagingOnSaved(const FString& Filename, UPackage* Pkg, FObjectPostSaveContext ObjectSaveContext);
-#endif
-
-/**
- * Keep Consistency of being file staged with simple argument
- *
- * @param	Filename			Saved filename
- */
-bool UpdateFileStagingOnSavedInternal(const FString& Filename);
-	
 /**
  * 
  *
@@ -280,17 +226,6 @@ bool UpdateFileStagingOnSavedInternal(const FString& Filename);
  */    
 void UpdateStateOnAssetRename(const FAssetData& InAssetData, const FString& InOldName);
 
-#if ENGINE_MAJOR_VERSION == 5
-/**
- * 
- *
- * @param	Filename			Saved filename
- * @param	Pkg					Package (for adapting delegate)
- * @param   ObjectSaveContext	Context for save (for adapting delegate)
- */
-bool UpdateChangelistStateByCommand();
-#endif
-	
 /**
  * Run a Git "cat-file" command to dump the binary content of a revision into a file.
  *
@@ -380,13 +315,9 @@ bool IsFileLFSLockable(const FString& InFile);
 /**
  * Gets Git attribute to see if these extensions are lockable
  */
-bool CheckLFSLockable(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InFiles, TArray<FString>& OutErrorMessages);
+GITSOURCECONTROL_API bool CheckLFSLockable(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InFiles, TArray<FString>& OutErrorMessages);
 
 GITSOURCECONTROL_API bool FetchRemote( const FString & InPathToGitBinary, const FString & InPathToRepositoryRoot, bool InUsingGitLfsLocking, TArray< FString > & OutResults, TArray< FString > & OutErrorMessages );
-
-bool PullOrigin(const FString& InPathToGitBinary, const FString& InPathToRepositoryRoot, const TArray<FString>& InFiles, TArray<FString>& OutFiles,
-				TArray<FString>& OutResults, TArray<FString>& OutErrorMessages);
-
 
 GITSOURCECONTROL_API TSharedPtr< class ISourceControlRevision, ESPMode::ThreadSafe > GetOriginRevisionOnBranch( const FString & InPathToGitBinary, const FString & InRepositoryRoot, const FString & InRelativeFileName, TArray< FString > & OutErrorMessages, const FString & BranchName );
 

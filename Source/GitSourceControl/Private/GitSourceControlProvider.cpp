@@ -15,7 +15,6 @@
 #include "GitSourceControlUtils.h"
 #include "SGitSourceControlSettings.h"
 #include "GitSourceControlRunner.h"
-#include "GitSourceControlChangelistState.h"
 #include "Logging/MessageLog.h"
 #include "ScopedSourceControlProgress.h"
 #include "SourceControlHelpers.h"
@@ -30,10 +29,6 @@
 #include "Misc/MessageDialog.h"
 
 #include "Runtime/Launch/Resources/Version.h"
-#if ENGINE_MAJOR_VERSION == 5
-#include "UObject/ObjectSaveContext.h"
-#endif
-
 #include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "GitSourceControl"
@@ -54,10 +49,6 @@ void FGitSourceControlProvider::Init(bool bForceConnection)
 		CheckGitAvailability();
 	}
 
-#if ENGINE_MAJOR_VERSION == 5
-	UPackage::PackageSavedWithContextEvent.AddStatic(&GitSourceControlUtils::UpdateFileStagingOnSaved);
-#endif
-	
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	AssetRegistryModule.Get().OnAssetRenamed().AddStatic(&GitSourceControlUtils::UpdateStateOnAssetRename);	
 
@@ -285,25 +276,6 @@ TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> FGitSourceControlProvide
 	}
 }
 
-#if ENGINE_MAJOR_VERSION == 5
-TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe> FGitSourceControlProvider::GetStateInternal(const FGitSourceControlChangelist& InChangelist)
-{
-	TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe>* State = ChangelistsStateCache.Find(InChangelist);
-	if (State != NULL)
-	{
-		// found cached item
-		return (*State);
-	}
-	else
-	{
-		// cache an unknown state for this item
-		TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe> NewState = MakeShared<FGitSourceControlChangelistState>(InChangelist);
-		ChangelistsStateCache.Add(InChangelist, NewState);
-		return NewState;
-	}
-}
-#endif
-
 FText FGitSourceControlProvider::GetStatusText() const
 {
 	FFormatNamedArguments Args;
@@ -383,22 +355,10 @@ ECommandResult::Type FGitSourceControlProvider::GetState( const TArray<FString>&
 	return ECommandResult::Succeeded;
 }
 
-#if ENGINE_MAJOR_VERSION >= 5
 ECommandResult::Type FGitSourceControlProvider::GetState(const TArray<FSourceControlChangelistRef>& InChangelists, TArray<FSourceControlChangelistStateRef>& OutState, EStateCacheUsage::Type InStateCacheUsage)
 {
-	if (!IsEnabled())
-	{
-		return ECommandResult::Failed;
-	}
-
-	for (FSourceControlChangelistRef Changelist : InChangelists)
-	{
-		FGitSourceControlChangelistRef GitChangelist = StaticCastSharedRef<FGitSourceControlChangelist>(Changelist);
-		OutState.Add(GetStateInternal(GitChangelist.Get()));
-	}
-	return ECommandResult::Succeeded;
+	return ECommandResult::Failed;
 }
-#endif
 
 TArray<FSourceControlStateRef> FGitSourceControlProvider::GetCachedStateByPredicate(TFunctionRef<bool(const FSourceControlStateRef&)> Predicate) const
 {
@@ -450,11 +410,7 @@ void FGitSourceControlProvider::UnregisterSourceControlStateChanged_Handle( FDel
 	OnSourceControlStateChanged.Remove( Handle );
 }
 
-#if ENGINE_MAJOR_VERSION < 5
-ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOperationRef& InOperation, const TArray<FString>& InFiles, EConcurrency::Type InConcurrency, const FSourceControlOperationComplete& InOperationCompleteDelegate )
-#else
 ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOperationRef& InOperation, FSourceControlChangelistPtr InChangelist, const TArray<FString>& InFiles, EConcurrency::Type InConcurrency, const FSourceControlOperationComplete& InOperationCompleteDelegate )
-#endif
 {
 	if(!IsEnabled() && !(InOperation->GetName() == "Connect")) // Only Connect operation allowed while not Enabled (Repository found)
 	{
@@ -463,24 +419,6 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 	}
 
 	TArray<FString> AbsoluteFiles = SourceControlHelpers::AbsoluteFilenames(InFiles);
-
-#if ENGINE_MAJOR_VERSION == 5
-	if (InOperation->GetName() == "CheckIn" && InChangelist.IsValid() && AbsoluteFiles.IsEmpty())
-	{
-		const TSharedPtr<FGitSourceControlChangelist, ESPMode::ThreadSafe> GitChangelist = StaticCastSharedPtr<FGitSourceControlChangelist>(InChangelist);
-		for (const FSourceControlStateRef& State : GetStateInternal(*GitChangelist)->GetFilesStates())
-		{
-			AbsoluteFiles.Add(State->GetFilename());
-		}
-		if (AbsoluteFiles.IsEmpty())
-		{
-			const FText Message = LOCTEXT("EmptyChangelistSubmit", "The selected changelist has no files to submit.");
-			InOperation->AddErrorMessge(Message);
-			InOperationCompleteDelegate.ExecuteIfBound(InOperation, ECommandResult::Failed);
-			return ECommandResult::Failed;
-		}
-	}
-#endif
 
 	// Query to see if we allow this operation
 	TSharedPtr<IGitSourceControlWorker, ESPMode::ThreadSafe> Worker = CreateWorker(InOperation->GetName());
@@ -503,11 +441,6 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 	Command->UpdateRepositoryRootIfSubmodule(AbsoluteFiles);
 	Command->Files = AbsoluteFiles;
 	Command->OperationCompleteDelegate = InOperationCompleteDelegate;
-
-#if ENGINE_MAJOR_VERSION == 5
-	TSharedPtr<FGitSourceControlChangelist, ESPMode::ThreadSafe> ChangelistPtr = StaticCastSharedPtr<FGitSourceControlChangelist>(InChangelist);
-	Command->Changelist = ChangelistPtr ? ChangelistPtr.ToSharedRef().Get() : FGitSourceControlChangelist();
-#endif
 	
 	// fire off operation
 	if(InConcurrency == EConcurrency::Synchronous)
@@ -530,34 +463,12 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 	}
 }
 
-#if ENGINE_MAJOR_VERSION < 5
 bool FGitSourceControlProvider::CanCancelOperation( const FSourceControlOperationRef& InOperation ) const
-#else
-bool FGitSourceControlProvider::CanCancelOperation( const FSourceControlOperationRef& InOperation ) const
-#endif
 {
-	// TODO: maybe support cancellation again?
-#if 0
-	for (int32 CommandIndex = 0; CommandIndex < CommandQueue.Num(); ++CommandIndex)
-	{
-		const FGitSourceControlCommand& Command = *CommandQueue[CommandIndex];
-		if (Command.Operation == InOperation)
-		{
-			check(Command.bAutoDelete);
-			return true;
-		}
-	}
-#endif
-
-	// operation was not in progress!
 	return false;
 }
 
-#if ENGINE_MAJOR_VERSION < 5
 void FGitSourceControlProvider::CancelOperation( const FSourceControlOperationRef& InOperation )
-#else
-void FGitSourceControlProvider::CancelOperation( const FSourceControlOperationRef& InOperation )
-#endif
 {
 	for (int32 CommandIndex = 0; CommandIndex < CommandQueue.Num(); ++CommandIndex)
 	{
@@ -578,7 +489,7 @@ bool FGitSourceControlProvider::UsesLocalReadOnlyState() const
 
 bool FGitSourceControlProvider::UsesChangelists() const
 {
-	return true;
+	return false;
 }
 
 bool FGitSourceControlProvider::UsesCheckout() const
@@ -586,7 +497,6 @@ bool FGitSourceControlProvider::UsesCheckout() const
 	return bUsingGitLfsLocking; // Git LFS Lock uses read-only state
 }
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 bool FGitSourceControlProvider::UsesFileRevisions() const
 {
 	return true;
@@ -613,9 +523,7 @@ TOptional<int> FGitSourceControlProvider::GetNumLocalChanges() const
 	return TOptional<int>();
 }
 #endif
-#endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
 bool FGitSourceControlProvider::AllowsDiffAgainstDepot() const
 {
 	return true;
@@ -623,23 +531,21 @@ bool FGitSourceControlProvider::AllowsDiffAgainstDepot() const
 
 bool FGitSourceControlProvider::UsesUncontrolledChangelists() const
 {
-	return true;
+	return false;
 }
 
 bool FGitSourceControlProvider::UsesSnapshots() const
 {
 	return false;
 }
-#endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8
+#if ENGINE_MINOR_VERSION >= 8
 bool FGitSourceControlProvider::UsesSoftRevertOnDelete() const
 {
 	return false;
 }
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
 bool FGitSourceControlProvider::CanExecuteOperation(const FSourceControlOperationRef& InOperation) const {
 	return WorkersMap.Find(InOperation->GetName()) != nullptr;
 }
@@ -656,7 +562,6 @@ TMap<ISourceControlProvider::EStatus, FString> FGitSourceControlProvider::GetSta
 	Result.Add(EStatus::Email, UserEmail);
 	return Result;
 }
-#endif
 
 TSharedPtr<IGitSourceControlWorker, ESPMode::ThreadSafe> FGitSourceControlProvider::CreateWorker(const FName& InOperationName) const
 {
@@ -691,25 +596,26 @@ void FGitSourceControlProvider::OutputCommandMessages(const FGitSourceControlCom
 
 void FGitSourceControlProvider::UpdateRepositoryStatus(const class FGitSourceControlCommand& InCommand)
 {
-	// For all operations running UpdateStatus, get Commit information:
+	// For all operations running UpdateStatus, get Commit and Branch information:
 	if (!InCommand.CommitId.IsEmpty())
 	{
 		CommitId = InCommand.CommitId;
 		CommitSummary = InCommand.CommitSummary;
 	}
+	if (!InCommand.BranchName.IsEmpty())
+	{
+		BranchName = InCommand.BranchName;
+		RemoteBranchName = InCommand.RemoteBranchName;
+	}
 }
 
 void FGitSourceControlProvider::Tick()
 {
-#if ENGINE_MAJOR_VERSION < 5
-	bool bStatesUpdated = false;
-#else
 	bool bStatesUpdated = TicksUntilNextForcedUpdate == 1;
 	if( TicksUntilNextForcedUpdate > 0 )
 	{
 		--TicksUntilNextForcedUpdate;
 	}
-#endif
 
 	for (int32 CommandIndex = 0; CommandIndex < CommandQueue.Num(); ++CommandIndex)
 	{
@@ -776,19 +682,10 @@ TArray< TSharedRef<ISourceControlLabel> > FGitSourceControlProvider::GetLabels( 
 	return Tags;
 }
 
-#if ENGINE_MAJOR_VERSION >= 5
 TArray<FSourceControlChangelistRef> FGitSourceControlProvider::GetChangelists( EStateCacheUsage::Type InStateCacheUsage )
 {
-	if (!IsEnabled())
-	{
-		return TArray<FSourceControlChangelistRef>();
-	}
-	
-	TArray<FSourceControlChangelistRef> Changelists;
-	Algo::Transform(ChangelistsStateCache, Changelists, [](const auto& Pair) { return MakeShared<FGitSourceControlChangelist, ESPMode::ThreadSafe>(Pair.Key); });
-	return Changelists;
+	return TArray<FSourceControlChangelistRef>();
 }
-#endif
 
 #if SOURCE_CONTROL_WITH_SLATE
 TSharedRef<class SWidget> FGitSourceControlProvider::MakeSettingsWidget() const
@@ -883,6 +780,8 @@ ECommandResult::Type FGitSourceControlProvider::IssueCommand(FGitSourceControlCo
 
 		InCommand.bCommandSuccessful = InCommand.DoWork();
 
+		UpdateRepositoryStatus(InCommand);
+
 		InCommand.Worker->UpdateStates();
 
 		OutputCommandMessages(InCommand);
@@ -917,7 +816,7 @@ void FGitSourceControlProvider::RegisterStateBranches(const TArray<FString>& Bra
 	StatusBranchNamePatternsInternal = BranchNames;
 }
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+#if ENGINE_MINOR_VERSION >= 7
 bool FGitSourceControlProvider::GetStateBranchAtIndex(int32 BranchIndex, FString& OutBranchName) const
 {
 	auto StatusBranchNames = GetStatusBranchNames();

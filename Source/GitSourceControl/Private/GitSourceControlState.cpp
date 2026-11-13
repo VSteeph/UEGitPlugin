@@ -5,11 +5,9 @@
 
 #include "GitSourceControlState.h"
 
-#if ENGINE_MAJOR_VERSION >= 5
 #include "Textures/SlateIcon.h"
 #if ENGINE_MINOR_VERSION >= 2
 #include "RevisionControlStyle/RevisionControlStyle.h"
-#endif
 #endif
 
 #define LOCTEXT_NAMESPACE "GitSourceControl.State"
@@ -51,7 +49,7 @@ TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlS
 	return nullptr;
 }
 
-#if ENGINE_MAJOR_VERSION < 5 || ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION < 3
+#if ENGINE_MINOR_VERSION < 3
 TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlState::GetBaseRevForMerge() const
 {
 	for(const auto& Revision : History)
@@ -67,14 +65,14 @@ TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlS
 }
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+#if ENGINE_MINOR_VERSION >= 2
 TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlState::GetCurrentRevision() const
 {
 	return nullptr;
 }
 #endif
 
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if ENGINE_MINOR_VERSION >= 3
 ISourceControlState::FResolveInfo FGitSourceControlState::GetResolveInfo() const
 {
 	return PendingResolveInfo;
@@ -83,11 +81,6 @@ ISourceControlState::FResolveInfo FGitSourceControlState::GetResolveInfo() const
 
 // @todo add Slate icons for git specific states (NotAtHead vs Conflicted...)
 
-#if ENGINE_MAJOR_VERSION < 5
-#define GET_ICON_RETURN( NAME ) FName( "ContentBrowser.SCC_" #NAME )
-FName FGitSourceControlState::GetIconName() const
-{
-#else
 #if ENGINE_MINOR_VERSION >= 2
 #define GET_ICON_RETURN( NAME ) FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl." #NAME )
 #else
@@ -95,7 +88,6 @@ FName FGitSourceControlState::GetIconName() const
 #endif
 FSlateIcon FGitSourceControlState::GetIcon() const
 {
-#endif
 	switch (GetGitState())
 	{
 	case EGitState::NotAtHead:
@@ -118,42 +110,9 @@ FSlateIcon FGitSourceControlState::GetIcon() const
 	case EGitState::Ignored:
 		return GET_ICON_RETURN(NotInDepot);
 	default:
-#if ENGINE_MAJOR_VERSION < 5
-	  return NAME_None;
-#else
 	  return FSlateIcon();
-#endif
 	}
 }
-
-#if ENGINE_MAJOR_VERSION < 5
-FName FGitSourceControlState::GetSmallIconName() const
-{
-	switch (GetGitState()) {
-	case EGitState::NotAtHead:
-	  return FName("ContentBrowser.SCC_NotAtHeadRevision_Small");
-	case EGitState::LockedOther:
-	  return FName("ContentBrowser.SCC_CheckedOutByOtherUser_Small");
-	case EGitState::NotLatest:
-	  return FName("ContentBrowser.SCC_ModifiedOtherBranch_Small");
-	case EGitState::Unmerged:
-	  return FName("ContentBrowser.SCC_Branched_Small");
-	case EGitState::Added:
-	  return FName("ContentBrowser.SCC_OpenForAdd_Small");
-	case EGitState::Untracked:
-	  return FName("ContentBrowser.SCC_NotInDepot_Small");
-	case EGitState::Deleted:
-	  return FName("ContentBrowser.SCC_MarkedForDelete_Small");
-	case EGitState::Modified:
-        case EGitState::CheckedOut:
-                return FName("ContentBrowser.SCC_CheckedOut_Small");
-	case EGitState::Ignored:
-	  return FName("ContentBrowser.SCC_NotInDepot_Small");
-	default:
-	  return NAME_None;
-	}
-}
-#endif
 
 FText FGitSourceControlState::GetDisplayName() const
 {
@@ -229,33 +188,8 @@ const FDateTime& FGitSourceControlState::GetTimeStamp() const
 	return TimeStamp;
 }
 
-// Deleted and Missing assets cannot appear in the Content Browser, but they do in the Submit files to Revision Control window!
 bool FGitSourceControlState::CanCheckIn() const
 {
-	// We can check in if this is new content
-	if (IsAdded())
-	{
-		return true;
-	}
-
-	// Cannot check back in if conflicted or not current 
-	if (!IsCurrent() || IsConflicted())
-	{
-		return false;
-	}
-
-	// We can check back in if we're locked.
-	if (State.LockState == ELockState::Locked)
-	{
-		return true;
-	}
-
-	// We can check in any file that has been modified, unless someone else locked it.
-	if (State.LockState != ELockState::LockedOther && IsModified() && IsSourceControlled())
-	{
-		return true;
-	}
-
 	return false;
 }
 
@@ -393,9 +327,18 @@ bool FGitSourceControlState::IsConflicted() const
 
 bool FGitSourceControlState::CanRevert() const
 {
-	// Can revert the file state if we modified, even if it was locked by someone else.
-	// Useful for when someone locked a file, and you just wanna play around with it locallly, and then revert it.
-	return CanCheckIn() || IsModified();
+	// Can revert the file state if we modified, added, or locked it locally.
+	if (IsAdded() || IsModified())
+	{
+		return true;
+	}
+
+	if (!IsCurrent() || IsConflicted())
+	{
+		return false;
+	}
+
+	return State.LockState == ELockState::Locked;
 }
 
 EGitState::Type FGitSourceControlState::GetGitState() const

@@ -5,7 +5,6 @@
 
 #pragma once
 
-#include "GitSourceControlChangelist.h"
 #include "ISourceControlProvider.h"
 #include "Misc/IQueuedWork.h"
 #include "Runtime/Launch/Resources/Version.h"
@@ -109,6 +108,12 @@ public:
 	/** Current Commit description's Summary */
 	FString CommitSummary;
 
+	/** Current checked-out branch name */
+	FString BranchName;
+
+	/** Current upstream remote tracking branch name */
+	FString RemoteBranchName;
+
 	/** If true, this command will be automatically cleaned up in Tick() */
 	bool bAutoDelete;
 
@@ -117,11 +122,6 @@ public:
 
 	/** Files to perform this operation on */
 	TArray<FString> Files;
-
-#if ENGINE_MAJOR_VERSION == 5
-    /** Changelist to perform this operation on */
-    FGitSourceControlChangelist Changelist;
-#endif
 
 	/** Potential error, warning and info message storage */
 	FGitSourceControlResultInfo ResultInfo;

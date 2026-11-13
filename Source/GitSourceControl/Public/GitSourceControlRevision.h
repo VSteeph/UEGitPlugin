@@ -14,11 +14,7 @@ class GITSOURCECONTROL_API FGitSourceControlRevision : public ISourceControlRevi
 {
 public:
 	/** ISourceControlRevision interface */
-#if ENGINE_MAJOR_VERSION >= 5
 	virtual bool Get( FString& InOutFilename, EConcurrency::Type InConcurrency = EConcurrency::Synchronous ) const override;
-#else
-	virtual bool Get( FString& InOutFilename ) const override;
-#endif
 
 	virtual bool GetAnnotated( TArray<FAnnotationLine>& OutLines ) const override;
 	virtual bool GetAnnotated( FString& InOutFilename ) const override;

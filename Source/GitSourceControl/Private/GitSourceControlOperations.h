@@ -54,20 +54,6 @@ public:
 	TMap<const FString, FGitState> States;
 };
 
-/** Commit (check-in) a set of files to the local depot. */
-class FGitCheckInWorker : public IGitSourceControlWorker
-{
-public:
-	virtual ~FGitCheckInWorker() {}
-	// IGitSourceControlWorker interface
-	virtual FName GetName() const override;
-	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
-};
-
 /** Add an untracked file to revision control (so only a subset of the git add command). */
 class FGitMarkForAddWorker : public IGitSourceControlWorker
 {
@@ -101,20 +87,6 @@ class FGitRevertWorker : public IGitSourceControlWorker
 {
 public:
 	virtual ~FGitRevertWorker() {}
-	// IGitSourceControlWorker interface
-	virtual FName GetName() const override;
-	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
-};
-
-/** Git pull --rebase to update branch from its configured remote */
-class FGitSyncWorker : public IGitSourceControlWorker
-{
-public:
-	virtual ~FGitSyncWorker() {}
 	// IGitSourceControlWorker interface
 	virtual FName GetName() const override;
 	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
@@ -169,7 +141,7 @@ public:
 	TMap<const FString, FGitState> States;
 };
 
-/** Git push to publish branch for its configured remote */
+/** Fetch targeted remote branches */
 class FGitFetchWorker : public IGitSourceControlWorker
 {
 public:
@@ -182,31 +154,3 @@ public:
 	/** Temporary states for results */
 	TMap<const FString, FGitState> States;
 };
-
-#if ENGINE_MAJOR_VERSION == 5
-class FGitMoveToChangelistWorker : public IGitSourceControlWorker
-{
-public:
-	virtual ~FGitMoveToChangelistWorker() {}
-	// IGitSourceControlWorker interface
-	virtual FName GetName() const override;
-	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-	
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
-};
-
-class FGitUpdateStagingWorker: public IGitSourceControlWorker
-{
-public:
-	virtual ~FGitUpdateStagingWorker() {}
-	// IGitSourceControlWorker interface
-	virtual FName GetName() const override;
-	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-	
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
-};
-#endif
