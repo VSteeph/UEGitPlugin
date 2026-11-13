@@ -163,15 +163,6 @@ void FGitSourceControlMenu::RevertClickedInternal(bool bUnlockAfterRevert)
 	Info.ExpireDuration = 0.0f;
 	Info.FadeOutDuration = 1.0f;
 
-	if (SourceControlProvider.CanCancelOperation(Operation))
-	{
-		Info.ButtonDetails.Add(FNotificationButtonInfo(
-			LOCTEXT("SourceControlMenuRevertAll_CancelButton", "Cancel"),
-			LOCTEXT("SourceControlMenuRevertAll_CancelButtonTooltip", "Cancel the revert operation."),
-			FSimpleDelegate::CreateStatic(&FGitSourceControlMenu::RevertAllCancelled, Operation)
-		));
-	}
-
 	OperationInProgressNotification = FSlateNotificationManager::Get().AddNotification(Info);
 	if (OperationInProgressNotification.IsValid())
 	{
@@ -311,19 +302,6 @@ void FGitSourceControlMenu::DisplayInProgressNotification(const FText& InOperati
 	}
 }
 
-void FGitSourceControlMenu::RevertAllCancelled(FSourceControlOperationRef InOperation)
-{
-	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
-	SourceControlProvider.CancelOperation(InOperation);
-
-	if (OperationInProgressNotification.IsValid())
-	{
-		OperationInProgressNotification.Pin()->ExpireAndFadeout();
-	}
-
-	OperationInProgressNotification.Reset();
-}
-
 // Remove the ongoing notification at the end of the operation
 void FGitSourceControlMenu::RemoveInProgressNotification()
 {
@@ -367,12 +345,6 @@ void FGitSourceControlMenu::DisplayFailureNotification(const FName& InOperationN
 void FGitSourceControlMenu::OnSourceControlOperationComplete(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult)
 {
 	RemoveInProgressNotification();
-
-	if (InOperation->GetName() == "Revert")
-	{
-		// Reload packages that were unlinked at the beginning of the Revert operation
-		GitSourceControlUtils::ReloadPackages(PackagesToReload);
-	}
 
 	// Report result with a notification
 	if (InResult == ECommandResult::Succeeded)

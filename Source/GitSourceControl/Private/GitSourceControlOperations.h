@@ -58,11 +58,14 @@ private:
 	void ReportLocksTakenByOthers(class FGitSourceControlCommand& InCommand, const TArray<FString>& InLockableFiles, const FString& InLockUser);
 };
 
-/** Add an untracked file to revision control (so only a subset of the git add command). */
-class FGitMarkForAddWorker : public IGitSourceControlWorker
+/**
+ * Answers the editor's add and move requests by refreshing the files' status only.
+ * The editor sends them on every new asset or rename; staging and committing belong to the team's Git client.
+ */
+class FGitStatusOnlyWorker : public IGitSourceControlWorker
 {
 public:
-	virtual ~FGitMarkForAddWorker() {}
+	explicit FGitStatusOnlyWorker(FName InOperationName);
 	// IGitSourceControlWorker interface
 	virtual FName GetName() const override;
 	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
@@ -70,20 +73,20 @@ public:
 
 	/** Temporary states for results */
 	TMap<const FString, FGitState> States;
+
+private:
+	FName OperationName;
 };
 
-/** Delete a file and remove it from revision control. */
-class FGitDeleteWorker : public IGitSourceControlWorker
+/**
+ * Deletes files from disk without staging the deletion.
+ * The editor leaves the deletion of a committed asset to the provider; the team's Git client then shows it as deleted.
+ */
+class FGitDeleteWorker final : public FGitStatusOnlyWorker
 {
 public:
-	virtual ~FGitDeleteWorker() {}
-	// IGitSourceControlWorker interface
-	virtual FName GetName() const override;
+	FGitDeleteWorker();
 	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
 };
 
 /** Revert local changes to a file without releasing Git LFS locks. */
@@ -130,33 +133,6 @@ public:
 
 	/** Map of filenames to history */
 	TMap<FString, TGitSourceControlHistory> Histories;
-};
-
-/** Copy or Move operation on a single file */
-class FGitCopyWorker : public IGitSourceControlWorker
-{
-public:
-	virtual ~FGitCopyWorker() {}
-	// IGitSourceControlWorker interface
-	virtual FName GetName() const override;
-	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
-};
-
-/** git add to mark a conflict as resolved */
-class FGitResolveWorker : public IGitSourceControlWorker
-{
-public:
-	virtual ~FGitResolveWorker() {}
-	virtual FName GetName() const override;
-	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
-	virtual bool UpdateStates() const override;
-
-	/** Temporary states for results */
-	TMap<const FString, FGitState> States;
 };
 
 /** Fetch targeted remote branches */

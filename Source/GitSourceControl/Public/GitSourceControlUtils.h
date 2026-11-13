@@ -34,13 +34,15 @@ struct GITSOURCECONTROL_API FGitLfsLockInfo
 	}
 };
 
-class FGitLockedFilesCache
+/** Locks last read from the LFS server, shared by the worker threads that query or change them. */
+class GITSOURCECONTROL_API FGitLockedFilesCache
 {
 public:
-	static FDateTime LastUpdated;
-
-	static const TMap<FString, FGitLfsLockInfo>& GetLockedFiles() { return LockedFiles; }
-	static void SetLockedFiles(const TMap<FString, FGitLfsLockInfo>& newLocks);
+	static TMap<FString, FGitLfsLockInfo> GetLockedFiles();
+	static bool IsExpired(const FDateTime& InNow, const FTimespan& InMaxAge);
+	/** Records a server query that failed, so the next statuses use the cache instead of waiting on the server again. */
+	static void MarkQueried(const FDateTime& InNow);
+	static void SetLockedFiles(const TMap<FString, FGitLfsLockInfo>& newLocks, const FDateTime& InNow);
 	static void AddLockedFile(const FString& filePath, const FGitLfsLockInfo& lockInfo);
 	static void RemoveLockedFile(const FString& filePath);
 
@@ -52,32 +54,18 @@ public:
 	static void ProtectFromUnlockedSave(const FString& filePath, ELockState::Type lockState);
 
 private:
-	static void OnFileLockChanged(const FString& filePath, const FGitLfsLockInfo& lockInfo, bool locked);
+	static void OnFileLockChanged(const FString& filePath);
+	static FDateTime LastUpdated;
 	static TMap<FString, FGitLfsLockInfo> LockedFiles;
+	static FCriticalSection LockedFilesLock;
+	/** Serializes read-only flag writes; taken before LockedFilesLock, never after. */
+	static FCriticalSection ReadOnlyFlagsLock;
 	static TSet<FString> ProtectedFreeFiles;
 	static FCriticalSection ProtectedFreeFilesLock;
 };
 
 namespace GitSourceControlUtils
 {
-	/**
-		*  Returns an updated repo root if all selected files are in a plugin subfolder, and the plugin subfolder is a git repo
-		*  This supports the case where each plugin is a sub module
-		*
-		* @param AbsoluteFilePaths		The list of files in the SC operation
-		* @param PathToRepositoryRoot	The original path to the repository root (used by default)
-		*/
-	FString ChangeRepositoryRootIfSubmodule(TArray<FString>& AbsoluteFilePaths, const FString& PathToRepositoryRoot);
-
-	/**
-		*  Returns an updated repo root if all selected file is in a plugin subfolder, and the plugin subfolder is a git repo
-		*  This supports the case where each plugin is a sub module
-		*
-		* @param AbsoluteFilePath		The file in the SC operation
-		* @param PathToRepositoryRoot	The original path to the repository root (used by default)
-		*/
-	FString ChangeRepositoryRootIfSubmodule(FString & AbsoluteFilePath, const FString& PathToRepositoryRoot);
-
 /**
  * Find the path to the Git binary, looking into a few places (standalone Git install, and other common tools embedding Git)
  * @returns the path to the Git binary if found, or an empty string.
@@ -145,12 +133,6 @@ bool GetBranchName(const FString& InPathToGitBinary, const FString& InRepository
  */
 bool GetRemoteBranchName(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutBranchName);
 
- /**
- * Get Git remote tracking branches that match wildcard
- * @returns false if no matching branches
- */
- bool GetRemoteBranchesWildcard(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const FString& PatternMatch, TArray<FString>& OutBranchNames);
- 
 /**
  * Get Git current commit details
  * @param	InPathToGitBinary	The path to the Git binary
@@ -187,11 +169,6 @@ TArray<FString> GetSourceControlledAssetPaths();
  */
 GITSOURCECONTROL_API  bool RunCommand( const FString & InCommand, const FString & InPathToGitBinary, const FString & InRepositoryRoot, const TArray< FString > & InParameters, const TArray< FString > & InFiles, TArray< FString > & OutResults, TArray< FString > & OutErrorMessages );
 bool RunCommandInternalRaw(const FString& InCommand, const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InParameters, const TArray<FString>& InFiles, FString& OutResults, FString& OutErrors, const int32 ExpectedReturnCode = 0);
-
-/**
- * Unloads packages of specified named files
- */
-TArray<class UPackage*> UnlinkPackages(const TArray<FString>& InPackageNames);
 
 /**
  * Reloads packages for these packages
@@ -245,15 +222,6 @@ bool RunUpdateStatus(const FString& InPathToGitBinary, const FString& InReposito
 					 TArray<FString>& OutErrorMessages, TMap<FString, FGitSourceControlState>& OutStates);
 
 /**
- * 
- *
- * @param	Filename			Saved filename
- * @param	Pkg					Package (for adapting delegate)
- * @param   ObjectSaveContext	Context for save (for adapting delegate)
- */    
-void UpdateStateOnAssetRename(const FAssetData& InAssetData, const FString& InOldName);
-
-/**
  * Run a Git "cat-file" command to dump the binary content of a revision into a file.
  *
  * @param	InPathToGitBinary	The path to the Git binary
@@ -298,7 +266,7 @@ TArray<FString> AbsoluteFilenames(const TArray<FString>& InFileNames, const FStr
  */
 void RemoveRedundantErrors(FGitSourceControlCommand& InCommand, const FString& InFilter);
 
-	bool RunLFSCommand(const FString& InCommand, const FString& InRepositoryRoot, const FString& GitBinaryFallback, const TArray<FString>& InParameters, const TArray<FString>& InFiles, TArray<FString>& OutResults, TArray<FString>& OutErrorMessages);
+	bool RunLFSCommand(const FString& InCommand, const FString& InRepositoryRoot, const FString& InPathToGitBinary, const TArray<FString>& InParameters, const TArray<FString>& InFiles, TArray<FString>& OutResults, TArray<FString>& OutErrorMessages);
 
 /**
  * Helper function for various commands to update cached states.
@@ -337,17 +305,12 @@ bool CollectNewStates(const TArray<FString>& InFiles, TMap<const FString, FGitSt
 		 * Run 'git lfs locks" to extract all lock information for all files in the repository
 		 *
 		 * @param	InRepositoryRoot	The Git repository from where to run the command - usually the Game directory
-		 * @param   GitBinaryFallBack   The Git binary fallback path
+		 * @param   InPathToGitBinary   The Git binary fallback path
 		 * @param	OutErrorMessages    Any errors (from StdErr) as an array per-line
 		 * @param	OutLocks		    The lock results (file, lock info)
 		 * @returns true if the command succeeded and returned no errors
 		 */
-	bool GetAllLocks(const FString& InRepositoryRoot, const FString& GitBinaryFallBack, TArray<FString>& OutErrorMessages, TMap<FString, FGitLfsLockInfo>& OutLocks, bool bInvalidateCache = false);
-
-/**
- * Gets locks from state cache
- */
-void GetLockedFiles(const TArray<FString>& InFiles, TArray<FString>& OutFiles);
+	bool GetAllLocks(const FString& InRepositoryRoot, const FString& InPathToGitBinary, TArray<FString>& OutErrorMessages, TMap<FString, FGitLfsLockInfo>& OutLocks, bool bInvalidateCache = false);
 
 /**
  * Checks cache for if this file type is lockable
@@ -359,12 +322,14 @@ bool IsFileLFSLockable(const FString& InFile);
  */
 GITSOURCECONTROL_API bool CheckLFSLockable(const FString& InPathToGitBinary, const FString& InRepositoryRoot, const TArray<FString>& InFiles, TArray<FString>& OutErrorMessages);
 
-GITSOURCECONTROL_API bool CheckGitLfsAvailability(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutErrorMessage);
+/**
+ * Tells whether Git LFS locking can protect the project's assets: Git LFS runs and .uasset and .umap are lockable.
+ * @param OutProblem	What the team must fix, when it cannot.
+ */
+GITSOURCECONTROL_API bool CheckLfsLocking(const FString& InPathToGitBinary, const FString& InRepositoryRoot, FString& OutProblem);
 
 GITSOURCECONTROL_API bool SyncUnlockHook(const FString& InPathToGitBinary, const FString& InRepositoryRoot, EGitUnlockMode InUnlockMode, FString& OutErrorMessage);
 
 GITSOURCECONTROL_API bool FetchRemote( const FString & InPathToGitBinary, const FString & InPathToRepositoryRoot, bool InUsingGitLfsLocking, TArray< FString > & OutResults, TArray< FString > & OutErrorMessages );
-
-GITSOURCECONTROL_API TSharedPtr< class ISourceControlRevision, ESPMode::ThreadSafe > GetOriginRevisionOnBranch( const FString & InPathToGitBinary, const FString & InRepositoryRoot, const FString & InRelativeFileName, TArray< FString > & OutErrorMessages, const FString & BranchName );
 
 }

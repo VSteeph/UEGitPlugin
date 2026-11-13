@@ -7,9 +7,7 @@
 #include "GitSourceControlStyle.h"
 
 #include "Textures/SlateIcon.h"
-#if ENGINE_MINOR_VERSION >= 2
 #include "RevisionControlStyle/RevisionControlStyle.h"
-#endif
 
 #define LOCTEXT_NAMESPACE "GitSourceControl.State"
 
@@ -50,35 +48,16 @@ TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlS
 	return nullptr;
 }
 
-#if ENGINE_MINOR_VERSION < 3
-TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlState::GetBaseRevForMerge() const
-{
-	for(const auto& Revision : History)
-	{
-		// look for the the SHA1 id of the file, not the commit id (revision)
-		if (Revision->FileHash == PendingMergeBaseFileHash)
-		{
-			return Revision;
-		}
-	}
-
-	return nullptr;
-}
-#endif
-
-#if ENGINE_MINOR_VERSION >= 2
 TSharedPtr<class ISourceControlRevision, ESPMode::ThreadSafe> FGitSourceControlState::GetCurrentRevision() const
 {
 	return nullptr;
 }
-#endif
 
-#if ENGINE_MINOR_VERSION >= 3
 ISourceControlState::FResolveInfo FGitSourceControlState::GetResolveInfo() const
 {
-	return PendingResolveInfo;
+	// Conflicts are resolved in the team's Git client.
+	return FResolveInfo();
 }
-#endif
 
 // @todo add Slate icons for git specific states (NotAtHead vs Conflicted...)
 

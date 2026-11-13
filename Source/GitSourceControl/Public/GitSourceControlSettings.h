@@ -25,23 +25,27 @@ public:
 	/** Set the Git Binary Path */
 	bool SetBinaryPath(const FString& InString);
 
-	/** Tell if using the Git LFS file Locking workflow */
-	bool IsUsingGitLfsLocking() const;
-
-	/** Configure the usage of Git LFS file Locking workflow */
-	bool SetUsingGitLfsLocking(const bool InUsingGitLfsLocking);
-
 	/** Get the username used by the Git LFS 2 File Locks server */
 	const FString GetLfsUserName() const;
 
 	/** Set the username used by the Git LFS 2 File Locks server */
 	bool SetLfsUserName(const FString& InString);
 
-	/** Get the automatic Git LFS unlock mode */
-	EGitUnlockMode GetUnlockMode() const;
+	/**
+	 * Reads the unlock mode the team chose, from the project's versioned Config/DefaultEditor.ini.
+	 * The file is read directly so a value saved in a user's own config layer can never override the team's choice.
+	 * @returns false when no team member chose a mode yet.
+	 */
+	static bool ReadProjectUnlockMode(EGitUnlockMode& OutUnlockMode);
 
-	/** Set the automatic Git LFS unlock mode */
-	bool SetUnlockMode(EGitUnlockMode InUnlockMode);
+	/** The mode the hook applies: the team's choice, else OnMerge. */
+	static EGitUnlockMode GetUnlockMode();
+
+	/** Writes the team's unlock mode into Config/DefaultEditor.ini, to be committed with the project. */
+	static bool WriteProjectUnlockMode(EGitUnlockMode InUnlockMode);
+
+	/** Absolute path of the versioned file holding the team's unlock mode. */
+	static FString GetProjectConfigFile();
 
 	/** Convert an unlock mode enum value to its persistent string representation */
 	static FString UnlockModeToString(EGitUnlockMode InUnlockMode);
@@ -62,12 +66,6 @@ private:
 	/** Git binary path */
 	FString BinaryPath;
 
-	/** Tells if using the Git LFS file Locking workflow */
-	bool bUsingGitLfsLocking = true;
-
 	/** Username used by the Git LFS 2 File Locks server */
 	FString LfsUserName;
-
-	/** Automatic Git LFS unlock mode */
-	EGitUnlockMode UnlockMode = EGitUnlockMode::OnMerge;
 };

@@ -10,11 +10,7 @@
 #include "ISourceControlProvider.h"
 #include "Runtime/Launch/Resources/Version.h"
 
-#if ENGINE_MINOR_VERSION >= 2
 namespace ETextCommit { enum Type : int; }
-#else
-namespace ETextCommit { enum Type; }
-#endif
 
 namespace ESelectInfo { enum Type : int; }
 
@@ -50,6 +46,8 @@ private:
 	FText GetSelectedUnlockModeText() const;
 	static FText GetUnlockModeLabel(EGitUnlockMode InMode);
 	static FText GetUnlockModeTooltip(EGitUnlockMode InMode);
+
+	TSharedRef<SWidget> MakeUnlockModeWidget();
 
 	TArray<TSharedPtr<EGitUnlockMode>> UnlockModeOptions;
 	TSharedPtr<EGitUnlockMode> SelectedUnlockMode;

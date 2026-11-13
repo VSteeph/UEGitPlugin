@@ -25,12 +25,6 @@ FGitSourceControlCommand::FGitSourceControlCommand(const TSharedRef<class ISourc
 	PathToGitBinary = Provider.GetGitBinaryPath();
 	bUsingGitLfsLocking = Provider.UsesCheckout();
 	PathToRepositoryRoot = Provider.GetPathToRepositoryRoot();
-	PathToGitRoot = Provider.GetPathToGitRoot();
-}
-
-void FGitSourceControlCommand::UpdateRepositoryRootIfSubmodule(TArray<FString>& AbsoluteFilePaths)
-{
-	PathToRepositoryRoot = GitSourceControlUtils::ChangeRepositoryRootIfSubmodule(AbsoluteFilePaths, PathToRepositoryRoot);
 }
 
 bool FGitSourceControlCommand::DoWork()

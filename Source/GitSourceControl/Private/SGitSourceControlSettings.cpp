@@ -16,6 +16,7 @@
 #include "Widgets/Input/SFilePathPicker.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "EditorDirectories.h"
+#include "Logging/MessageLog.h"
 #include "Styling/AppStyle.h"
 #include "GitSourceControlModule.h"
 #include "GitSourceControlUtils.h"
@@ -55,22 +56,7 @@ void SGitSourceControlSettings::ConstructBasedOnEngineVersion( )
 	#define TT_UserName LOCTEXT("UserNameLabel_Tooltip", "Git Username fetched from local config")
 	#define TT_Email LOCTEXT("GitUserEmail_Tooltip", "Git E-mail fetched from local config")
 	#define TT_LFS LOCTEXT("LfsUserName_Tooltip", "Git LFS username used to identify your locks (auto-detected when possible)")
-	#define TT_UnlockMode LOCTEXT("UnlockMode_Tooltip", "Automatic Git LFS unlock policy via the repository reference-transaction hook")
-
-	UnlockModeOptions.Reset();
-	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::OnMerge));
-	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::OnPush));
-	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::None));
-	const EGitUnlockMode CurrentUnlockMode = FGitSourceControlModule::Get().AccessSettings().GetUnlockMode();
-	SelectedUnlockMode = UnlockModeOptions[0];
-	for (const TSharedPtr<EGitUnlockMode>& Option : UnlockModeOptions)
-	{
-		if (Option.IsValid() && *Option == CurrentUnlockMode)
-		{
-			SelectedUnlockMode = Option;
-			break;
-		}
-	}
+	#define TT_UnlockMode LOCTEXT("UnlockMode_Tooltip", "When Git LFS locks are released automatically. Shared by the whole team through Config/DefaultEditor.ini.")
 
 	ChildSlot
 	[
@@ -181,19 +167,37 @@ void SGitSourceControlSettings::ConstructBasedOnEngineVersion( )
 			]
 			ROW_RIGHT( 10.0f )
 			[
-				SNew(SComboBox<TSharedPtr<EGitUnlockMode>>)
-				.OptionsSource(&UnlockModeOptions)
-				.InitiallySelectedItem(SelectedUnlockMode)
-				.OnGenerateWidget(this, &Self::OnGenerateUnlockModeWidget)
-				.OnSelectionChanged(this, &Self::OnUnlockModeChanged)
-				.ToolTipText( TT_UnlockMode )
-				[
-					SNew(STextBlock)
-					.Text(this, &Self::GetSelectedUnlockModeText)
-				]
+				MakeUnlockModeWidget()
 			]
 		]
 	];
+}
+
+TSharedRef<SWidget> SGitSourceControlSettings::MakeUnlockModeWidget()
+{
+	EGitUnlockMode ProjectUnlockMode;
+	if (FGitSourceControlSettings::ReadProjectUnlockMode(ProjectUnlockMode))
+	{
+		// Another team member already chose: the mode is shown, never asked again.
+		return SNew(STextBlock)
+			.Text(GetUnlockModeLabel(ProjectUnlockMode))
+			.ToolTipText(FText::Format(LOCTEXT("UnlockMode_Shared_Tooltip", "{0}\nSet for the whole team in {1}."),
+				GetUnlockModeTooltip(ProjectUnlockMode), FText::FromString(FGitSourceControlSettings::GetProjectConfigFile())));
+	}
+
+	UnlockModeOptions.Reset();
+	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::OnMerge));
+	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::OnPush));
+	UnlockModeOptions.Add(MakeShared<EGitUnlockMode>(EGitUnlockMode::None));
+	return SNew(SComboBox<TSharedPtr<EGitUnlockMode>>)
+		.OptionsSource(&UnlockModeOptions)
+		.OnGenerateWidget(this, &SGitSourceControlSettings::OnGenerateUnlockModeWidget)
+		.OnSelectionChanged(this, &SGitSourceControlSettings::OnUnlockModeChanged)
+		.ToolTipText(LOCTEXT("UnlockMode_Choose_Tooltip", "First setup of this project: choose for the whole team. The choice is saved in Config/DefaultEditor.ini, commit it."))
+		[
+			SNew(STextBlock)
+			.Text(this, &SGitSourceControlSettings::GetSelectedUnlockModeText)
+		];
 }
 
 FString SGitSourceControlSettings::GetBinaryPathString() const
@@ -269,17 +273,20 @@ void SGitSourceControlSettings::OnUnlockModeChanged(TSharedPtr<EGitUnlockMode> I
 		return;
 	}
 	SelectedUnlockMode = InMode;
-	FGitSourceControlModule& GitSourceControl = FGitSourceControlModule::Get();
-	GitSourceControl.AccessSettings().SetUnlockMode(*InMode);
-	GitSourceControl.AccessSettings().SaveSettings();
-	GitSourceControl.GetProvider().UpdateSettings();
-	GitSourceControl.GetProvider().SyncUnlockHook();
+	if (!FGitSourceControlSettings::WriteProjectUnlockMode(*InMode))
+	{
+		FMessageLog("SourceControl").Error(FText::Format(LOCTEXT("UnlockMode_WriteFailed", "Could not save the unlock mode in {0}."),
+			FText::FromString(FGitSourceControlSettings::GetProjectConfigFile())));
+		return;
+	}
+	FGitSourceControlModule::Get().GetProvider().SyncUnlockHook();
 }
 
 FText SGitSourceControlSettings::GetSelectedUnlockModeText() const
 {
-	const EGitUnlockMode Mode = FGitSourceControlModule::Get().AccessSettings().GetUnlockMode();
-	return GetUnlockModeLabel(Mode);
+	return SelectedUnlockMode.IsValid()
+		? GetUnlockModeLabel(*SelectedUnlockMode)
+		: LOCTEXT("UnlockMode_Choose", "Choose for the whole team...");
 }
 
 FText SGitSourceControlSettings::GetUnlockModeLabel(EGitUnlockMode InMode)

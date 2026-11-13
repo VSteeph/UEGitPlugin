@@ -24,7 +24,6 @@ public:
 
 protected:
 	static void RevertAllCallback(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult, bool bUnlockAfterRevert);
-	static void RevertAllCancelled(FSourceControlOperationRef InOperation);
 
 private:
 	void RevertClickedInternal(bool bUnlockAfterRevert);
@@ -41,9 +40,6 @@ private:
 	static void DisplayFailureNotification(const FName& InOperationName);
 
 private:
-	/** Loaded packages to reload after a Revert operation */
-	TArray<UPackage*> PackagesToReload;
-
 	/** Current revision control operation from extended menu if any */
 	static TWeakPtr<class SNotificationItem> OperationInProgressNotification;
 
