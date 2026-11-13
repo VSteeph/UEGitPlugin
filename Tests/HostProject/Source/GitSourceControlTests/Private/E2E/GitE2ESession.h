@@ -18,6 +18,11 @@
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #include "UObject/StrongObjectPtr.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/SToolTip.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
 
 namespace GitE2EPrivateAccess
 {
@@ -69,6 +74,7 @@ public:
 	{
 		FGitSourceControlSettings& Settings = FGitSourceControlModule::Get().AccessSettings();
 		SavedLfsUserName = Settings.GetLfsUserName();
+		SavedUnlockMode = Settings.GetUnlockMode();
 		Settings.SetLfsUserName(FString());
 		PreviousDialogHandler = FCoreDelegates::ModalMessageDialog;
 		FCoreDelegates::ModalMessageDialog.BindRaw(this, &FGitE2ESession::AnswerDialog);
@@ -165,6 +171,17 @@ public:
 	/** Edits the asset in memory and saves it through the editor, as a designer does with Ctrl+S. */
 	bool EditAndSave(const FGitE2EAsset& Asset, float Value)
 	{
+		if (!SaveFromEditor(Asset, Value))
+		{
+			Test.AddError(FString::Printf(TEXT("The editor could not save %s"), *Asset.PackageName));
+			return false;
+		}
+		return true;
+	}
+
+	/** Edits the asset in memory and presses Ctrl+S; returns whether the editor saved it. */
+	bool SaveFromEditor(const FGitE2EAsset& Asset, float Value)
+	{
 		UCurveFloat* Curve = FindObject<UCurveFloat>(nullptr, *Asset.ObjectPath);
 		if (!Curve || Curve->FloatCurve.GetNumKeys() == 0)
 		{
@@ -173,18 +190,44 @@ public:
 		}
 		Curve->FloatCurve.Keys[0].Value = Value;
 		Curve->MarkPackageDirty();
-		if (!UEditorLoadingAndSavingUtils::SavePackages({ Curve->GetPackage() }, true))
-		{
-			Test.AddError(FString::Printf(TEXT("The editor could not save %s"), *Asset.PackageName));
-			return false;
-		}
+		// Ctrl+S comes from a person, like a click: windows it opens must reach the designer instead of being skipped.
+		TGuardValue<bool> AttendedSave(GIsAutomationTesting, false);
+		// Same call as Ctrl+S in the asset editor, which asks to check out a read-only file before saving.
+		const bool bSaved = FEditorFileUtils::PromptForCheckoutAndSave({ Curve->GetPackage() }, false, false) == FEditorFileUtils::PR_Success;
 		// The Content Browser polls the status of visible assets; a headless editor has no visible asset to poll.
 		ISourceControlModule::Get().QueueStatusUpdate(Asset.AbsoluteFile);
-		return true;
+		return bSaved;
 	}
 
-	/** Publishes on the base branch a colleague's version of the asset, a valid package holding another value. */
-	bool PublishColleagueVersion(const FGitE2EAsset& Asset, float Value)
+	/** The designer closes the next "Check Out Assets" window the editor opens, after reading what it lists. */
+	void CloseNextCheckOutAssetsWindow()
+	{
+		// The window is modal: only Slate keeps ticking while it is open, so the designer acts from a Slate tick.
+		CheckOutWindowTicks = 0;
+		CheckOutWindowHandle = FSlateApplication::Get().OnPreTick().AddLambda([this](float)
+		{
+			const TSharedPtr<SWindow> Window = FSlateApplication::Get().GetActiveModalWindow();
+			// The title follows the editor language: the window is recognised by the dialog it hosts.
+			if (!Window.IsValid() || !ContainsWidgetOfType(Window.ToSharedRef(), FName(TEXT("SPackagesDialog"))))
+			{
+				return;
+			}
+			// Leaves the window a few frames to build its rows before reading them.
+			if (++CheckOutWindowTicks < 5)
+			{
+				return;
+			}
+			TArray<FString> Texts;
+			CollectTexts(Window.ToSharedRef(), Texts);
+			DialogMessages.Add(FString::Printf(TEXT("%s: %s"), *Window->GetTitle().ToString(), *FString::Join(Texts, TEXT(" | "))));
+			FSlateApplication::Get().OnPreTick().Remove(CheckOutWindowHandle);
+			CheckOutWindowHandle.Reset();
+			Window->RequestDestroyWindow();
+		});
+	}
+
+	/** Builds, from the designer's copy, the tree of the base branch where the asset holds a colleague's value. */
+	bool MakeColleagueTree(const FGitE2EAsset& Asset, float Value, FString& OutTree)
 	{
 		UCurveFloat* Curve = FindObject<UCurveFloat>(nullptr, *Asset.ObjectPath);
 		if (!Curve || Curve->FloatCurve.GetNumKeys() == 0)
@@ -199,17 +242,174 @@ public:
 		const float LocalValue = Curve->FloatCurve.Keys[0].Value;
 		const FString ColleagueFile = FPaths::ConvertRelativePathToFull(FPaths::CreateTempFilename(*FPaths::ProjectIntermediateDir(), TEXT("Colleague"), TEXT(".uasset")));
 		Curve->FloatCurve.Keys[0].Value = Value;
-		bool bPublished = Save(Curve) && IFileManager::Get().Copy(*ColleagueFile, *Asset.AbsoluteFile) == COPY_OK;
+		bool bMade = Save(Curve) && IFileManager::Get().Copy(*ColleagueFile, *Asset.AbsoluteFile) == COPY_OK;
 		Curve->FloatCurve.Keys[0].Value = LocalValue;
-		bPublished &= Save(Curve);
+		bMade &= Save(Curve);
 		PlatformFile.SetReadOnly(*Asset.AbsoluteFile, bWasReadOnly);
+		bMade = bMade && Repository.MakeRemoteTreeWithFile(TEXT("main"), Asset.RelativeFile, ColleagueFile, OutTree);
+		IFileManager::Get().Delete(*ColleagueFile);
+		return bMade;
+	}
+
+	/** Publishes on the base branch a colleague's version of the asset, a valid package holding another value. */
+	bool PublishColleagueVersion(const FGitE2EAsset& Asset, float Value)
+	{
 		FString Tree;
 		FString Commit;
-		bPublished = bPublished
-			&& Repository.MakeRemoteTreeWithFile(TEXT("main"), Asset.RelativeFile, ColleagueFile, Tree)
+		return MakeColleagueTree(Asset, Value, Tree)
 			&& Repository.PublishTreeOnRemote(Tree, TEXT("main"), Commit);
-		IFileManager::Get().Delete(*ColleagueFile);
-		return bPublished;
+	}
+
+	/** A colleague's version of the asset reaches the given server branch from their machine; this clone has not fetched it. */
+	bool PublishColleagueVersionOnServer(const FGitE2EAsset& Asset, float Value, const FString& Branch)
+	{
+		FString Tree;
+		FString Commit;
+		if (!MakeColleagueTree(Asset, Value, Tree)
+			|| !Repository.RunGit(FString::Printf(TEXT("commit-tree %s -p origin/main -m \"Colleague change\""), *Tree), Commit)
+			// A ref outside refs/heads carries the objects without moving this clone's remote-tracking branches.
+			|| !Repository.RunGit(FString::Printf(TEXT("push --quiet --force origin %s:refs/e2e/colleague"), *Commit))
+			|| !RunGitOnServer(FString::Printf(TEXT("update-ref refs/heads/%s %s"), *Branch, *Commit)))
+		{
+			return false;
+		}
+		ServerBranches.AddUnique(TEXT("refs/e2e/colleague"));
+		if (Branch != TEXT("main"))
+		{
+			ServerBranches.AddUnique(Branch);
+		}
+		ExpectedServerCommits.Add(Branch, Commit);
+		return true;
+	}
+
+	/** Creates the designer's branch and pushes it, as Fork does before the first commit. */
+	bool StartFeatureBranch()
+	{
+		FeatureBranch = FString::Printf(TEXT("feature/e2e-%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		ServerBranches.AddUnique(FeatureBranch);
+		return Repository.RunGit(FString::Printf(TEXT("checkout --quiet -b %s"), *FeatureBranch))
+			&& Repository.RunGit(FString::Printf(TEXT("push --quiet --set-upstream origin %s"), *FeatureBranch));
+	}
+
+	/** Commits the saved asset on the designer's branch and pushes it, as the designer does in Fork. */
+	bool CommitAndPush(const FGitE2EAsset& Asset)
+	{
+		if (FeatureBranch.IsEmpty())
+		{
+			FeatureBranch = FString::Printf(TEXT("feature/e2e-%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+			ServerBranches.AddUnique(FeatureBranch);
+			if (!Repository.RunGit(FString::Printf(TEXT("checkout --quiet -b %s"), *FeatureBranch)))
+			{
+				return false;
+			}
+		}
+		return Repository.RunGit(FString::Printf(TEXT("add -- \"%s\""), *Asset.RelativeFile))
+			&& Repository.RunGit(TEXT("commit --quiet -m \"Edit asset\""))
+			&& Repository.RunGit(FString::Printf(TEXT("push --quiet --set-upstream origin %s"), *FeatureBranch));
+	}
+
+	enum class EMergeMethod { Merge, Squash, Rebase };
+
+	/** Merges the designer's pull request into main on the server, as the Git host does; the local clone is untouched. */
+	bool MergePullRequestOnServer(EMergeMethod Method)
+	{
+		FString Base;
+		if (!RunGitOnServer(TEXT("rev-parse main"), Base))
+		{
+			return false;
+		}
+		if (Method == EMergeMethod::Rebase)
+		{
+			// The base branch has not moved since the branch started: each commit replays with its own tree.
+			FString Commits;
+			if (!RunGitOnServer(FString::Printf(TEXT("rev-list --reverse main..%s"), *FeatureBranch), Commits))
+			{
+				return false;
+			}
+			TArray<FString> CommitList;
+			Commits.ParseIntoArrayLines(CommitList);
+			for (const FString& Commit : CommitList)
+			{
+				if (!RunGitOnServer(FString::Printf(TEXT("-c user.name=Host -c user.email=host@example.invalid commit-tree %s^{tree} -p %s -m \"Rebased commit\""), *Commit, *Base), Base))
+				{
+					return false;
+				}
+			}
+		}
+		else
+		{
+			const FString Parents = Method == EMergeMethod::Squash ? FString::Printf(TEXT("-p %s"), *Base) : FString::Printf(TEXT("-p %s -p %s"), *Base, *FeatureBranch);
+			if (!RunGitOnServer(FString::Printf(TEXT("-c user.name=Host -c user.email=host@example.invalid commit-tree %s^{tree} %s -m \"Merge pull request\""), *FeatureBranch, *Parents), Base))
+			{
+				return false;
+			}
+		}
+		ExpectedServerCommits.Add(TEXT("main"), Base);
+		return RunGitOnServer(FString::Printf(TEXT("update-ref refs/heads/main %s"), *Base));
+	}
+
+	/** Fetch from the designer's Git client, with the editor not involved. */
+	bool FetchFromGitClient()
+	{
+		return Repository.RunGit(TEXT("fetch --quiet origin"));
+	}
+
+	/** What Fork shows once a fetch received the server's latest commit on the branch. */
+	bool HasFetched(const FString& Branch) const
+	{
+		const FString* Expected = ExpectedServerCommits.Find(Branch);
+		FString Tracking;
+		return Expected
+			&& Repository.RunGitQuietly(FString::Printf(TEXT("rev-parse --verify --quiet origin/%s"), *Branch)) == 0
+			&& Repository.RunGit(FString::Printf(TEXT("rev-parse origin/%s"), *Branch), Tracking)
+			&& Tracking == *Expected;
+	}
+
+	bool ColleagueLocks(const FGitE2EAsset& Asset) const
+	{
+		return Repository.RunGitAs(TEXT("Colleague"), FString::Printf(TEXT("lfs lock \"%s\""), *Asset.RelativeFile));
+	}
+
+	bool ColleagueUnlocks(const FGitE2EAsset& Asset) const
+	{
+		return Repository.RunGitAs(TEXT("Colleague"), FString::Printf(TEXT("lfs unlock \"%s\""), *Asset.RelativeFile));
+	}
+
+	/** Picks an Unlock Mode in the plugin settings panel with the keyboard: arrows on the closed combo box. */
+	bool SelectUnlockMode(EGitUnlockMode Mode)
+	{
+		const TSharedRef<SWidget> Panel = FGitSourceControlModule::Get().GetProvider().MakeSettingsWidget();
+		const TSharedPtr<SComboBox<TSharedPtr<EGitUnlockMode>>> ComboBox = FindUnlockModeComboBox(Panel);
+		if (!ComboBox.IsValid())
+		{
+			Test.AddError(TEXT("The settings panel has no Unlock Mode combo box"));
+			return false;
+		}
+		// Slate dispatches key presses through the public SWidget interface; SComboBox narrows the override to protected.
+		const TSharedRef<SWidget> FocusedWidget = ComboBox.ToSharedRef();
+		const auto PressKey = [&FocusedWidget](const FKey& Key)
+		{
+			FocusedWidget->OnKeyDown(FGeometry(), FKeyEvent(Key, FModifierKeysState(), 0, false, 0, 0));
+		};
+		const auto IsSelected = [&ComboBox, Mode]()
+		{
+			const TSharedPtr<EGitUnlockMode> Selected = ComboBox->GetSelectedItem();
+			return Selected.IsValid() && *Selected == Mode;
+		};
+		for (int32 Press = 0; Press < 3; ++Press)
+		{
+			PressKey(EKeys::Up);
+		}
+		for (int32 Press = 0; Press < 3 && !IsSelected(); ++Press)
+		{
+			PressKey(EKeys::Down);
+		}
+		if (!IsSelected())
+		{
+			Test.AddError(TEXT("The Unlock Mode combo box never reached the requested mode"));
+			return false;
+		}
+		return true;
 	}
 
 	/** Value of the asset the editor currently holds in memory, NaN when the asset is not loaded. */
@@ -338,9 +538,28 @@ public:
 			Repository.ForceUnlockOnServer(Asset.RelativeFile);
 			Repository.RunGitQuietly(FString::Printf(TEXT("checkout -- \"%s\""), *Asset.RelativeFile));
 		}
+		if (CheckOutWindowHandle.IsValid())
+		{
+			FSlateApplication::Get().OnPreTick().Remove(CheckOutWindowHandle);
+		}
+		if (!FeatureBranch.IsEmpty())
+		{
+			Repository.RunGitQuietly(TEXT("checkout --quiet main"));
+			Repository.RunGitQuietly(FString::Printf(TEXT("branch --quiet -D %s"), *FeatureBranch));
+		}
+		for (const FString& Branch : ServerBranches)
+		{
+			Repository.RunGitQuietly(FString::Printf(TEXT("push --quiet origin --delete %s"), *Branch));
+		}
 		Repository.RunGitQuietly(TEXT("fetch --quiet origin main"));
 		Repository.RunGitQuietly(TEXT("merge --quiet --ff-only origin/main"));
-		FGitSourceControlModule::Get().AccessSettings().SetLfsUserName(SavedLfsUserName);
+		FGitSourceControlSettings& Settings = FGitSourceControlModule::Get().AccessSettings();
+		Settings.SetLfsUserName(SavedLfsUserName);
+		if (Settings.SetUnlockMode(SavedUnlockMode))
+		{
+			Settings.SaveSettings();
+			FGitSourceControlModule::Get().GetProvider().SyncUnlockHook();
+		}
 	}
 
 	FAutomationTestBase& Test;
@@ -352,6 +571,73 @@ public:
 	bool bFailed = false;
 
 private:
+	static TSharedPtr<SComboBox<TSharedPtr<EGitUnlockMode>>> FindUnlockModeComboBox(const TSharedRef<SWidget>& Widget)
+	{
+		if (Widget->GetType() == FName(TEXT("SComboBox<TSharedPtr<EGitUnlockMode>>")))
+		{
+			return StaticCastSharedRef<SComboBox<TSharedPtr<EGitUnlockMode>>>(Widget);
+		}
+		FChildren* Children = Widget->GetChildren();
+		for (int32 Index = 0; Children && Index < Children->Num(); ++Index)
+		{
+			if (TSharedPtr<SComboBox<TSharedPtr<EGitUnlockMode>>> Found = FindUnlockModeComboBox(Children->GetChildAt(Index)))
+			{
+				return Found;
+			}
+		}
+		return nullptr;
+	}
+
+	static bool ContainsWidgetOfType(const TSharedRef<SWidget>& Widget, const FName Type)
+	{
+		if (Widget->GetType() == Type)
+		{
+			return true;
+		}
+		FChildren* Children = Widget->GetChildren();
+		for (int32 Index = 0; Children && Index < Children->Num(); ++Index)
+		{
+			if (ContainsWidgetOfType(Children->GetChildAt(Index), Type))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Every label and hover text of a widget tree, depth first: what the designer can read in a window. */
+	static void CollectTexts(const TSharedRef<SWidget>& Widget, TArray<FString>& OutTexts)
+	{
+		if (Widget->GetType() == FName(TEXT("STextBlock")))
+		{
+			OutTexts.Add(StaticCastSharedRef<STextBlock>(Widget)->GetText().ToString());
+		}
+		const TSharedPtr<IToolTip> ToolTip = Widget->GetToolTip();
+		if (ToolTip.IsValid() && ToolTip->AsWidget()->GetType() == FName(TEXT("SToolTip")))
+		{
+			OutTexts.Add(StaticCastSharedRef<SToolTip>(ToolTip->AsWidget())->GetTextTooltip().ToString());
+		}
+		FChildren* Children = Widget->GetChildren();
+		for (int32 Index = 0; Children && Index < Children->Num(); ++Index)
+		{
+			CollectTexts(Children->GetChildAt(Index), OutTexts);
+		}
+	}
+
+	/** Runs git in the bare remote, standing for the Git host. */
+	bool RunGitOnServer(const FString& Arguments, FString& Output) const
+	{
+		FString RemoteDirectory;
+		return Repository.RunGit(TEXT("remote get-url origin"), RemoteDirectory)
+			&& Repository.RunGit(Arguments, Output, RemoteDirectory);
+	}
+
+	bool RunGitOnServer(const FString& Arguments) const
+	{
+		FString Output;
+		return RunGitOnServer(Arguments, Output);
+	}
+
 	bool Save(UCurveFloat* Curve)
 	{
 		FSavePackageArgs Args;
@@ -391,6 +677,14 @@ private:
 	TArray<EAppReturnType::Type> DialogAnswers;
 	TDelegate<EAppReturnType::Type(EAppMsgCategory, EAppMsgType::Type, const FText&, const FText&)> PreviousDialogHandler;
 	FString SavedLfsUserName;
+	EGitUnlockMode SavedUnlockMode = EGitUnlockMode::OnMerge;
+	FString FeatureBranch;
+	/** Branches this scenario created on the server, deleted on tear down. */
+	TArray<FString> ServerBranches;
+	/** Latest commit the server holds on each branch the scenario published to. */
+	TMap<FString, FString> ExpectedServerCommits;
+	FDelegateHandle CheckOutWindowHandle;
+	int32 CheckOutWindowTicks = 0;
 	bool bConnected = false;
 	bool bTornDown = false;
 };
@@ -430,6 +724,27 @@ namespace GitE2E
 		}));
 	}
 
+	/** Fails as soon as the condition stops holding during the given time, as a designer watching it would notice. */
+	inline void KeepsHolding(const TSharedRef<FGitE2ESession>& Session, const FString& What, TFunction<bool()> Condition, double Seconds = 10.0)
+	{
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Session, What, Condition, Seconds, StartTime = 0.0]() mutable
+		{
+			if (Session->bFailed)
+			{
+				return true;
+			}
+			if (!Condition())
+			{
+				Session->Test.AddError(FString::Printf(TEXT("Stopped holding: %s\n%s"), *What, *Session->Describe()));
+				Session->bFailed = true;
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds();
+			StartTime = StartTime > 0.0 ? StartTime : Now;
+			return Now - StartTime > Seconds;
+		}));
+	}
+
 	/** Connects the provider like a designer, then commits and pushes the given number of fresh assets. */
 	inline void Start(const TSharedRef<FGitE2ESession>& Session, int32 AssetCount)
 	{
@@ -459,6 +774,20 @@ namespace GitE2E
 			const FSourceControlStatePtr State = Session->GetState(Session->Assets[AssetIndex]);
 			return State.IsValid() && State->IsCheckedOut();
 		});
+	}
+
+	/** Revision Control > Git > Refresh. */
+	inline void Refresh(const TSharedRef<FGitE2ESession>& Session)
+	{
+		Do(Session, [Session]()
+		{
+			return Session->Click(FGitE2ESession::FindEntry(Session->OpenRevisionControlMenu(), "GitRefresh"));
+		});
+	}
+
+	inline FName IconOf(const FSourceControlStatePtr& State)
+	{
+		return State.IsValid() ? State->GetIcon().GetStyleName() : NAME_None;
 	}
 
 	inline void Finish(const TSharedRef<FGitE2ESession>& Session)

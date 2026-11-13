@@ -402,4 +402,196 @@ bool FShould_ReopenRestoredMap_When_DesignerRevertsAllAssetsWithMapOpen::RunTest
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_RefuseSaveAndKeepDisk_When_ColleagueLockedAsset,
+	"UEGitPlugin.E2E.Should_RefuseSaveAndKeepDisk_When_ColleagueLockedAsset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_RefuseSaveAndKeepDisk_When_ColleagueLockedAsset::RunTest(const FString& Parameters)
+{
+	// Arrange: a colleague locked the asset without changing it; the designer sees the red padlock.
+	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
+	TSharedRef<bool> bSaved = MakeShared<bool>(true);
+	GitE2E::Start(Session, 1);
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
+	GitLockManagerE2ETests::ClickGitMenu(Session, "GitRefresh");
+	GitE2E::WaitUntil(Session, TEXT("the asset shows the colleague's lock"),
+		[Session]() { return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])) == GitLockManagerE2ETests::LockOtherIcon; });
+
+	// Act: the designer edits the asset anyway, presses Ctrl+S and closes the Check Out Assets window.
+	GitE2E::Do(Session, [Session, bSaved]()
+	{
+		Session->CloseNextCheckOutAssetsWindow();
+		*bSaved = Session->SaveFromEditor(Session->Assets[0], FGitE2ESession::EditedValue);
+		return true;
+	});
+
+	// Assert
+	GitE2E::Do(Session, [this, Session, bSaved]()
+	{
+		const FGitE2EAsset& Asset = Session->Assets[0];
+		const bool bDiskMatchesCommit = Session->Repository.RunGitQuietly(FString::Printf(TEXT("diff --quiet HEAD -- \"%s\""), *Asset.RelativeFile)) == 0;
+		const FString Shown = FString::Join(Session->DialogMessages, TEXT(" | "));
+		TestFalse(TEXT("The editor does not save the asset"), *bSaved);
+		TestTrue(TEXT("The file on disk is the committed version"), bDiskMatchesCommit);
+		// The editor's own text, resolved in the editor language: the Check Out Assets window warns that the asset is locked.
+		const FString LockedWarning = NSLOCTEXT("PackagesDialogModule", "CheckoutPackagesWarnMessage", "Warning: There are modified assets which you will not be able to check out as they are locked or not at the head revision. You may lose your changes if you continue, as you will be unable to submit them to revision control.").ToString();
+		TestTrue(FString::Printf(TEXT("The Check Out Assets window warns the asset is locked: '%s'"), *Shown), Shown.Contains(LockedWarning));
+		TestEqual(TEXT("The colleague keeps the lock"), Session->ServerLockOwner(Asset), FString(TEXT("Colleague")));
+		return true;
+	});
+	GitE2E::Finish(Session);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_CheckOutWithoutWarning_When_ColleagueReleasedLock,
+	"UEGitPlugin.E2E.Should_CheckOutWithoutWarning_When_ColleagueReleasedLock",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_CheckOutWithoutWarning_When_ColleagueReleasedLock::RunTest(const FString& Parameters)
+{
+	// Arrange: the designer saw the colleague's lock, then the colleague released it.
+	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
+	GitE2E::Start(Session, 1);
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
+	GitLockManagerE2ETests::ClickGitMenu(Session, "GitRefresh");
+	GitE2E::WaitUntil(Session, TEXT("the asset shows the colleague's lock"),
+		[Session]() { return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])) == GitLockManagerE2ETests::LockOtherIcon; });
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueUnlocks(Session->Assets[0]); });
+	GitLockManagerE2ETests::ClickGitMenu(Session, "GitRefresh");
+	GitE2E::WaitUntil(Session, TEXT("the asset icon disappears"),
+		[Session]() { return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])).IsNone(); });
+
+	// Act: right-click > Revision Control > Check Out.
+	GitE2E::CheckOutFromContentBrowser(Session, 0);
+
+	// Assert
+	GitE2E::Do(Session, [this, Session]()
+	{
+		const FGitE2EAsset& Asset = Session->Assets[0];
+		TestEqual(TEXT("No dialog interrupts the designer"), Session->DialogMessages.Num(), 0);
+		TestEqual(TEXT("The server holds the designer's lock"), Session->ServerLockOwner(Asset), FString(TEXT("Designer")));
+		TestEqual(TEXT("The asset shows the green pencil"), GitLockManagerE2ETests::IconOf(Session->GetState(Asset)), GitLockManagerE2ETests::LockSelfIcon);
+		return true;
+	});
+	GitE2E::Finish(Session);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_CheckOutOtherAsset_When_ColleagueLocksSeveralAssets,
+	"UEGitPlugin.E2E.Should_CheckOutOtherAsset_When_ColleagueLocksSeveralAssets",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_CheckOutOtherAsset_When_ColleagueLocksSeveralAssets::RunTest(const FString& Parameters)
+{
+	// Arrange: the colleague holds two of three assets.
+	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
+	GitE2E::Start(Session, 3);
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]) && Session->ColleagueLocks(Session->Assets[1]); });
+	GitLockManagerE2ETests::ClickGitMenu(Session, "GitRefresh");
+	GitE2E::WaitUntil(Session, TEXT("both assets show the colleague's lock"), [Session]()
+	{
+		return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])) == GitLockManagerE2ETests::LockOtherIcon
+			&& GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[1])) == GitLockManagerE2ETests::LockOtherIcon;
+	});
+
+	// Act: right-click on the third asset > Revision Control > Check Out.
+	GitE2E::CheckOutFromContentBrowser(Session, 2);
+
+	// Assert
+	GitE2E::Do(Session, [this, Session]()
+	{
+		TestEqual(TEXT("The server holds the designer's lock on the third asset"), Session->ServerLockOwner(Session->Assets[2]), FString(TEXT("Designer")));
+		TestEqual(TEXT("The colleague keeps the first asset"), Session->ServerLockOwner(Session->Assets[0]), FString(TEXT("Colleague")));
+		TestEqual(TEXT("The colleague keeps the second asset"), Session->ServerLockOwner(Session->Assets[1]), FString(TEXT("Colleague")));
+		return true;
+	});
+	GitE2E::Finish(Session);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_CheckOutAsset_When_ColleagueReleasesOneOfSeveralLocks,
+	"UEGitPlugin.E2E.Should_CheckOutAsset_When_ColleagueReleasesOneOfSeveralLocks",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_CheckOutAsset_When_ColleagueReleasesOneOfSeveralLocks::RunTest(const FString& Parameters)
+{
+	// Arrange: the colleague holds two assets, so Check Out is greyed out; then they release the first one.
+	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
+	GitE2E::Start(Session, 2);
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]) && Session->ColleagueLocks(Session->Assets[1]); });
+	GitLockManagerE2ETests::ClickGitMenu(Session, "GitRefresh");
+	GitE2E::WaitUntil(Session, TEXT("the first asset shows the colleague's lock"),
+		[Session]() { return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])) == GitLockManagerE2ETests::LockOtherIcon; });
+	GitE2E::Do(Session, [this, Session]()
+	{
+		UToolMenu* Menu = Session->OpenAssetRevisionControlMenu({ Session->Assets[0] });
+		TestFalse(TEXT("Check Out is greyed out while the colleague holds the asset"), FGitE2ESession::CanClick(FGitE2ESession::FindEntry(Menu, "SCCCheckOut")));
+		return true;
+	});
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueUnlocks(Session->Assets[0]); });
+	GitLockManagerE2ETests::ClickGitMenu(Session, "GitRefresh");
+	GitE2E::WaitUntil(Session, TEXT("the first asset icon disappears"),
+		[Session]() { return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])).IsNone(); });
+
+	// Act
+	GitE2E::CheckOutFromContentBrowser(Session, 0);
+
+	// Assert
+	GitE2E::Do(Session, [this, Session]()
+	{
+		TestEqual(TEXT("The server holds the designer's lock on the first asset"), Session->ServerLockOwner(Session->Assets[0]), FString(TEXT("Designer")));
+		TestEqual(TEXT("The colleague keeps the second asset"), Session->ServerLockOwner(Session->Assets[1]), FString(TEXT("Colleague")));
+		return true;
+	});
+	GitE2E::Finish(Session);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FShould_ShowColleagueLock_When_ColleagueLocksJustBeforeCheckOut,
+	"UEGitPlugin.E2E.Should_ShowColleagueLock_When_ColleagueLocksJustBeforeCheckOut",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FShould_ShowColleagueLock_When_ColleagueLocksJustBeforeCheckOut::RunTest(const FString& Parameters)
+{
+	// Arrange: the designer opens the menu on a free asset; the colleague locks it before the click.
+	const TSharedRef<FGitE2ESession> Session = MakeShared<FGitE2ESession>(*this);
+	TSharedRef<UToolMenu*> Menu = MakeShared<UToolMenu*>(nullptr);
+	// The refused lock is reported in the Revision Control log.
+	AddExpectedError(TEXT("already created lock"), EAutomationExpectedErrorFlags::Contains, 0);
+	AddExpectedError(TEXT("locked by Colleague"), EAutomationExpectedErrorFlags::Contains, 0);
+	AddExpectedError(TEXT("Command 'CheckOut' Failed!"), EAutomationExpectedErrorFlags::Contains, 0);
+	GitE2E::Start(Session, 1);
+	GitE2E::Do(Session, [Session, Menu]() { *Menu = Session->OpenAssetRevisionControlMenu({ Session->Assets[0] }); return *Menu != nullptr; });
+	GitE2E::WaitUntil(Session, TEXT("Check Out is available in the asset menu"),
+		[Menu]() { return FGitE2ESession::CanClick(FGitE2ESession::FindEntry(*Menu, "SCCCheckOut")); });
+	GitE2E::Do(Session, [Session]() { return Session->ColleagueLocks(Session->Assets[0]); });
+
+	// Act: the designer clicks Check Out and closes the plugin's message, then the editor's.
+	GitE2E::Do(Session, [Session]() { Session->AnswerNextDialog(EAppReturnType::Ok); Session->AnswerNextDialog(EAppReturnType::Ok); return true; });
+	GitE2E::Do(Session, [Session, Menu]() { return Session->Click(FGitE2ESession::FindEntry(*Menu, "SCCCheckOut")); });
+
+	// Assert
+	GitE2E::WaitUntil(Session, TEXT("the asset shows the colleague's lock"),
+		[Session]() { return GitLockManagerE2ETests::IconOf(Session->GetState(Session->Assets[0])) == GitLockManagerE2ETests::LockOtherIcon; });
+	GitE2E::Do(Session, [this, Session]()
+	{
+		const FSourceControlStatePtr State = Session->GetState(Session->Assets[0]);
+		const FString Tooltip = State.IsValid() ? State->GetDisplayTooltip().ToString() : FString();
+		const FString Shown = FString::Join(Session->DialogMessages, TEXT(" | "));
+		TestTrue(FString::Printf(TEXT("The message names the colleague: '%s'"), *Shown), Shown.Contains(TEXT("locked by Colleague")));
+		TestFalse(FString::Printf(TEXT("The message does not blame the connection: '%s'"), *Shown), Shown.Contains(TEXT("connection")));
+		TestTrue(FString::Printf(TEXT("The hover names the colleague: '%s'"), *Tooltip), Tooltip.Contains(TEXT("Colleague")));
+		TestEqual(TEXT("The colleague keeps the lock"), Session->ServerLockOwner(Session->Assets[0]), FString(TEXT("Colleague")));
+		TestTrue(TEXT("The asset stays read-only"), FPlatformFileManager::Get().GetPlatformFile().IsReadOnly(*Session->Assets[0].AbsoluteFile));
+		return true;
+	});
+	GitE2E::Finish(Session);
+	return true;
+}
+
 #endif
