@@ -22,7 +22,9 @@ public class GitSourceControl : ModuleRules
 				"SourceControl",
 				"SourceControlWindows",
 				"ToolMenus",
-				"Projects"
+				"Projects",
+				"ContentBrowser",
+				"Json"
 			}
 		);
 

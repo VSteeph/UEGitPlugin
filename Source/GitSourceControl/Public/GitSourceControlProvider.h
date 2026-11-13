@@ -156,10 +156,17 @@ public:
 		return RemoteUrl;
 	}
 
-	inline const FString& GetLockUser() const
+	inline FString GetLockUser() const
 	{
+		FScopeLock Lock(&LockUserCriticalSection);
 		return LockUser;
 	}
+
+	/** Queue an auto-detected LFS username from a worker thread to be applied on the game thread. */
+	void QueueAutoDetectedLockUser(const FString& InDetectedUser);
+
+	/** Apply an auto-detected LFS username on the game thread; it is used while no LFS username is saved. */
+	void ApplyAutoDetectedLockUser(const FString& InDetectedUser);
 
 	/** Helper function used to update state cache */
 	TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> GetStateInternal(const FString& Filename);
@@ -212,7 +219,11 @@ private:
 
 	FString PathToGitBinary;
 
+	/** Guards LockUser and the detected names, read by worker threads and the connection thread. */
+	mutable FCriticalSection LockUserCriticalSection;
 	FString LockUser;
+	FString AutoDetectedLockUser;
+	FString PendingAutoDetectedLockUser;
 
 	/** Critical section for thread safety of error messages that occurred after last perforce command */
 	mutable FCriticalSection LastErrorsCriticalSection;

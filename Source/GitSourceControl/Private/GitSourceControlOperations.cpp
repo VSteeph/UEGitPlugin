@@ -150,29 +150,83 @@ bool FGitCheckOutWorker::Execute(FGitSourceControlCommand& InCommand)
 
 	if (bAnyFileOutOfDate)
 	{
-		GitSourceControlUtils::CollectNewStates(CheckoutStates, States);
+		// Only the remote check ran: the file, tree and lock states stay Unset so the cache keeps what it knew.
+		for (const TPair<FString, FGitSourceControlState>& Pair : CheckoutStates)
+		{
+			FGitState RemoteOnly;
+			RemoteOnly.FileState = EFileState::Unset;
+			RemoteOnly.TreeState = ETreeState::Unset;
+			RemoteOnly.LockState = ELockState::Unset;
+			RemoteOnly.RemoteState = Pair.Value.State.RemoteState;
+			RemoteOnly.HeadBranch = Pair.Value.State.HeadBranch;
+			States.Add(Pair.Key, RemoteOnly);
+		}
 		InCommand.bCommandSuccessful = false;
 		return false;
 	}
 
-	const bool bSuccess = GitSourceControlUtils::RunLFSCommand(TEXT("lock"), InCommand.PathToGitRoot, InCommand.PathToGitBinary, FGitSourceControlModule::GetEmptyStringArray(), LockableRelativeFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+	TArray<FString> LockResults;
+	const bool bSuccess = GitSourceControlUtils::RunLFSCommand(TEXT("lock"), InCommand.PathToGitRoot, InCommand.PathToGitBinary, { TEXT("--json") }, LockableRelativeFiles, LockResults, InCommand.ResultInfo.ErrorMessages);
+	InCommand.ResultInfo.InfoMessages.Append(LockResults);
 	InCommand.bCommandSuccessful = bSuccess;
-	const FString& LockUser = FGitSourceControlModule::Get().GetProvider().GetLockUser();
+
+	FGitSourceControlProvider& Provider = FGitSourceControlModule::Get().GetProvider();
+	const FString FallbackLockUser = Provider.GetLockUser();
 	if (bSuccess)
 	{
-		TArray<FString> AbsoluteFiles;
-		for (const auto& RelativeFile : RelativeFiles)
+		TMap<FString, FGitLfsLockInfo> ParsedLocks;
+		if (GitSourceControlUtils::ParseLfsLocksListJson(InCommand.PathToGitRoot, FString::Join(LockResults, TEXT("\n")), ParsedLocks))
 		{
-			FString AbsoluteFile = FPaths::Combine(InCommand.PathToGitRoot, RelativeFile);
-			FGitLockedFilesCache::AddLockedFile(AbsoluteFile, LockUser);
+			for (const TPair<FString, FGitLfsLockInfo>& Pair : ParsedLocks)
+			{
+				if (!Pair.Value.LockUser.IsEmpty())
+				{
+					Provider.QueueAutoDetectedLockUser(Pair.Value.LockUser);
+					break;
+				}
+			}
+		}
+
+		TArray<FString> AbsoluteFiles;
+		TMap<FString, FGitLfsLockInfo> ResolvedLockInfos;
+		for (const auto& RelativeFile : LockableRelativeFiles)
+		{
+			FString AbsoluteFile = FPaths::ConvertRelativePathToFull(InCommand.PathToGitRoot, RelativeFile);
 			FPaths::NormalizeFilename(AbsoluteFile);
+
+			FGitLfsLockInfo LockInfo;
+			if (const FGitLfsLockInfo* ParsedInfo = ParsedLocks.Find(AbsoluteFile))
+			{
+				LockInfo = *ParsedInfo;
+			}
+			if (LockInfo.LockUser.IsEmpty())
+			{
+				LockInfo.LockUser = FallbackLockUser;
+			}
+			if (LockInfo.LockedAt.GetTicks() <= 0)
+			{
+				LockInfo.LockedAt = FDateTime::UtcNow();
+			}
+			LockInfo.bHasVerifiedOwnership = true;
+			LockInfo.bIsOwnLock = true;
+
+			FGitLockedFilesCache::AddLockedFile(AbsoluteFile, LockInfo);
+			ResolvedLockInfos.Add(AbsoluteFile, LockInfo);
 			AbsoluteFiles.Add(AbsoluteFile);
 		}
 
 		GitSourceControlUtils::CollectNewStates(AbsoluteFiles, States, EFileState::Unset, ETreeState::Unset, ELockState::Locked);
 		for (auto& State : States)
 		{
-			State.Value.LockUser = LockUser;
+			if (const FGitLfsLockInfo* ResolvedInfo = ResolvedLockInfos.Find(State.Key))
+			{
+				State.Value.LockUser = ResolvedInfo->LockUser;
+				State.Value.LockDate = ResolvedInfo->LockedAt;
+			}
+			else
+			{
+				State.Value.LockUser = FallbackLockUser;
+			}
 		}
 	}
 
@@ -309,8 +363,20 @@ FName FGitRevertWorker::GetName() const
 	return "Revert";
 }
 
+FName FGitRevertAndUnlockWorker::GetName() const
+{
+	return "RevertAndUnlock";
+}
+
 bool FGitRevertWorker::Execute(FGitSourceControlCommand& InCommand)
 {
+	if (InCommand.Files.IsEmpty())
+	{
+		InCommand.ResultInfo.ErrorMessages.Add(TEXT("Revert requires at least one file."));
+		InCommand.bCommandSuccessful = false;
+		return false;
+	}
+
 	InCommand.bCommandSuccessful = true;
 
 	// Filter files by status
@@ -319,59 +385,55 @@ bool FGitRevertWorker::Execute(FGitSourceControlCommand& InCommand)
 	TArray<FString> OtherThanAddedExistingFiles;
 	GetMissingVsExistingFiles(InCommand.Files, MissingFiles, AllExistingFiles, OtherThanAddedExistingFiles);
 
-	const bool bRevertAll = InCommand.Files.Num() < 1;
-	if (bRevertAll)
+	if (MissingFiles.Num() > 0)
 	{
-		TArray<FString> Parms;
-		Parms.Add(TEXT("--hard"));
-		InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("reset"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, Parms, FGitSourceControlModule::GetEmptyStringArray(), InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
-
-		Parms.Reset(2);
-		Parms.Add(TEXT("-f")); // force
-		Parms.Add(TEXT("-d")); // remove directories
-		InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("clean"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, Parms, FGitSourceControlModule::GetEmptyStringArray(), InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+		// "Added" files that have been deleted needs to be removed from revision control
+		InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("rm"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), MissingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
 	}
-	else
+	if (AllExistingFiles.Num() > 0)
 	{
-		if (MissingFiles.Num() > 0)
+		// Unstage any staged changes (including Added and staged Modified files) before checkout.
+		InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("reset"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), AllExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+	}
+	if (OtherThanAddedExistingFiles.Num() > 0)
+	{
+		// Revert working copy changes for tracked files only (skipping Added files unstaged by `reset` above).
+		// May need to try a few times due to file locks from prior operations.
+		bool CheckoutSuccess = false;
+		int32 Attempts = 10;
+		while (Attempts-- > 0)
 		{
-			// "Added" files that have been deleted needs to be removed from revision control
-			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("rm"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), MissingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
-		}
-		if (AllExistingFiles.Num() > 0)
-		{
-			// reset and revert any changes already added to the index
-			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("reset"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), AllExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
-			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("checkout"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), AllExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
-		}
-		if (OtherThanAddedExistingFiles.Num() > 0)
-		{
-			// revert any changes in working copy (this would fails if the asset was in "Added" state, since after "reset" it is now "untracked")
-			// may need to try a few times due to file locks from prior operations
-			bool CheckoutSuccess = false;
-			int32 Attempts = 10;
-			while( Attempts-- > 0 )
+			CheckoutSuccess = GitSourceControlUtils::RunCommand(TEXT("checkout"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), OtherThanAddedExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+			if (CheckoutSuccess)
 			{
-				CheckoutSuccess = GitSourceControlUtils::RunCommand(TEXT("checkout"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), OtherThanAddedExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
-				if (CheckoutSuccess)
-				{
-					break;
-				}
-
-				FPlatformProcess::Sleep(0.1f);
+				break;
 			}
-			
-			InCommand.bCommandSuccessful &= CheckoutSuccess;
+
+			FPlatformProcess::Sleep(0.1f);
 		}
+
+		InCommand.bCommandSuccessful &= CheckoutSuccess;
 	}
 
-	if (InCommand.bUsingGitLfsLocking)
+	if (ShouldUnlock() && InCommand.bUsingGitLfsLocking && InCommand.bCommandSuccessful)
 	{
-		// unlock files: execute the LFS command on relative filenames
-		// (unlock only locked files, that is, not Added files)
+		// Ask the server rather than the lock cache: a lock released elsewhere (another machine, the web UI, an unlock hook)
+		// still looks held locally, and unlocking it again fails the whole command.
+		TMap<FString, FGitLfsLockInfo> ServerLocks;
+		InCommand.bCommandSuccessful &= GitSourceControlUtils::GetAllLocks(InCommand.PathToRepositoryRoot, InCommand.PathToGitBinary, InCommand.ResultInfo.ErrorMessages, ServerLocks, true);
+		const FString LockUser = FGitSourceControlModule::Get().GetProvider().GetLockUser();
 		TArray<FString> LockedFiles;
-		GitSourceControlUtils::GetLockedFiles(OtherThanAddedExistingFiles, LockedFiles);
-		if (LockedFiles.Num() > 0)
+		for (const FString& File : InCommand.Files)
+		{
+			FString NormalizedFile = File;
+			FPaths::NormalizeFilename(NormalizedFile);
+			const FGitLfsLockInfo* Lock = ServerLocks.Find(NormalizedFile);
+			if (Lock && Lock->IsOwnedBy(LockUser))
+			{
+				LockedFiles.Add(NormalizedFile);
+			}
+		}
+		if (InCommand.bCommandSuccessful && LockedFiles.Num() > 0)
 		{
 			const TArray<FString>& RelativeFiles = GitSourceControlUtils::RelativeFilenames(LockedFiles, InCommand.PathToGitRoot);
 			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunLFSCommand(TEXT("unlock"), InCommand.PathToGitRoot, InCommand.PathToGitBinary, FGitSourceControlModule::GetEmptyStringArray(), RelativeFiles,
@@ -386,19 +448,9 @@ bool FGitRevertWorker::Execute(FGitSourceControlCommand& InCommand)
 		}
 	}
 
-	// If no files were specified (full revert), refresh all relevant files instead of the specified files (which is an empty list in full revert)
-	// This is required so that files that were "Marked for add" have their status updated after a full revert.
-	TArray<FString> FilesToUpdate = InCommand.Files;
-	if (InCommand.Files.Num() <= 0)
-	{
-		for (const auto& File : MissingFiles) FilesToUpdate.Add(File);
-		for (const auto& File : AllExistingFiles) FilesToUpdate.Add(File);
-		for (const auto& File : OtherThanAddedExistingFiles) FilesToUpdate.Add(File);
-	}
-
 	// now update the status of our files
 	TMap<FString, FGitSourceControlState> UpdatedStates;
-	bool bSuccess = GitSourceControlUtils::RunUpdateStatus(InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, InCommand.bUsingGitLfsLocking, FilesToUpdate, InCommand.ResultInfo.ErrorMessages, UpdatedStates);
+	bool bSuccess = GitSourceControlUtils::RunUpdateStatus(InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, InCommand.bUsingGitLfsLocking, InCommand.Files, InCommand.ResultInfo.ErrorMessages, UpdatedStates);
 	if (bSuccess)
 	{
 		GitSourceControlUtils::CollectNewStates(UpdatedStates, States);

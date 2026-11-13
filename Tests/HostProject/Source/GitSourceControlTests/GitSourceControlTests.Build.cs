@@ -7,12 +7,18 @@ public class GitSourceControlTests : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		PrivateDependencyModuleNames.AddRange(new[]
 		{
+			"AssetRegistry",
+			"ContentBrowser",
+			"ContentBrowserData",
 			"Core",
 			"CoreUObject",
 			"Engine",
 			"GitSourceControl",
 			"Projects",
+			"Slate",
+			"SlateCore",
 			"SourceControl",
+			"ToolMenus",
 			"UnrealEd"
 		});
 	}

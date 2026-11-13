@@ -15,20 +15,37 @@ class FGitSourceControlCommand;
 
 struct FGitVersion;
 
+struct GITSOURCECONTROL_API FGitLfsLockInfo
+{
+	FString LockUser;
+	FDateTime LockedAt;
+	bool bHasVerifiedOwnership = false;
+	bool bIsOwnLock = false;
+
+	bool IsOwnedBy(const FString& InLfsUserName) const
+	{
+		if (bHasVerifiedOwnership)
+		{
+			return bIsOwnLock;
+		}
+		return !InLfsUserName.IsEmpty() && LockUser.Equals(InLfsUserName, ESearchCase::IgnoreCase);
+	}
+};
+
 class FGitLockedFilesCache
 {
 public:
 	static FDateTime LastUpdated;
 
- static const TMap<FString, FString>& GetLockedFiles() { return LockedFiles; }
- static void SetLockedFiles(const TMap<FString, FString>& newLocks);
- static void AddLockedFile(const FString& filePath, const FString& lockUser);
- static void RemoveLockedFile(const FString& filePath);
+	static const TMap<FString, FGitLfsLockInfo>& GetLockedFiles() { return LockedFiles; }
+	static void SetLockedFiles(const TMap<FString, FGitLfsLockInfo>& newLocks);
+	static void AddLockedFile(const FString& filePath, const FGitLfsLockInfo& lockInfo);
+	static void RemoveLockedFile(const FString& filePath);
 
 private:
- static void OnFileLockChanged(const FString& filePath, const FString& lockUser, bool locked);
- // update local read/write state when our own lock statuses change
-	static TMap<FString, FString> LockedFiles;
+	static void OnFileLockChanged(const FString& filePath, const FGitLfsLockInfo& lockInfo, bool locked);
+	// update local read/write state when our own lock statuses change
+	static TMap<FString, FGitLfsLockInfo> LockedFiles;
 };
 
 namespace GitSourceControlUtils
@@ -292,15 +309,30 @@ GITSOURCECONTROL_API bool CollectNewStates( const TMap< FString, FGitSourceContr
 bool CollectNewStates(const TArray<FString>& InFiles, TMap<const FString, FGitState>& OutResults, EFileState::Type FileState, ETreeState::Type TreeState = ETreeState::Unset, ELockState::Type LockState = ELockState::Unset, ERemoteState::Type RemoteState = ERemoteState::Unset);
 
 	/**
+	 * Case-insensitive comparison for Git LFS usernames.
+	 */
+	GITSOURCECONTROL_API bool AreLockUsersEqual(const FString& UserA, const FString& UserB);
+
+	/**
+	 * Parses the JSON output of `git lfs locks --verify --json`.
+	 */
+	GITSOURCECONTROL_API bool ParseLfsLocksVerifyJson(const FString& InRepositoryRoot, const FString& InJsonText, TMap<FString, FGitLfsLockInfo>& OutLocks, FString& OutDetectedOwnUser);
+
+	/**
+	 * Parses the JSON output of `git lfs locks --json` or `git lfs lock --json`.
+	 */
+	GITSOURCECONTROL_API bool ParseLfsLocksListJson(const FString& InRepositoryRoot, const FString& InJsonText, TMap<FString, FGitLfsLockInfo>& OutLocks);
+
+	/**
 		 * Run 'git lfs locks" to extract all lock information for all files in the repository
 		 *
 		 * @param	InRepositoryRoot	The Git repository from where to run the command - usually the Game directory
 		 * @param   GitBinaryFallBack   The Git binary fallback path
 		 * @param	OutErrorMessages    Any errors (from StdErr) as an array per-line
-		 * @param	OutLocks		    The lock results (file, username)
+		 * @param	OutLocks		    The lock results (file, lock info)
 		 * @returns true if the command succeeded and returned no errors
 		 */
-	bool GetAllLocks(const FString& InRepositoryRoot, const FString& GitBinaryFallBack, TArray<FString>& OutErrorMessages, TMap<FString, FString>& OutLocks, bool bInvalidateCache = false);
+	bool GetAllLocks(const FString& InRepositoryRoot, const FString& GitBinaryFallBack, TArray<FString>& OutErrorMessages, TMap<FString, FGitLfsLockInfo>& OutLocks, bool bInvalidateCache = false);
 
 /**
  * Gets locks from state cache

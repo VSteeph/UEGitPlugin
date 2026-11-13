@@ -20,9 +20,12 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Logging/MessageLog.h"
+#include "Dom/JsonObject.h"
 #include "Misc/DateTime.h"
 #include "Misc/ScopeLock.h"
 #include "Misc/Timespan.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 #include "PackageTools.h"
 #include "FileHelpers.h"
@@ -46,48 +49,48 @@ const int32 MaxFilesPerBatch = 50;
 } // namespace GitSourceControlConstants
 
 FDateTime FGitLockedFilesCache::LastUpdated = FDateTime::MinValue();
-TMap<FString, FString> FGitLockedFilesCache::LockedFiles = TMap<FString, FString>();
+TMap<FString, FGitLfsLockInfo> FGitLockedFilesCache::LockedFiles = TMap<FString, FGitLfsLockInfo>();
 
-void FGitLockedFilesCache::SetLockedFiles(const TMap<FString, FString>& newLocks)
-{	
-	for (auto lock : LockedFiles)
+void FGitLockedFilesCache::SetLockedFiles(const TMap<FString, FGitLfsLockInfo>& newLocks)
+{
+	for (const TPair<FString, FGitLfsLockInfo>& lock : LockedFiles)
 	{
 		if (!newLocks.Contains(lock.Key))
 		{
 			OnFileLockChanged(lock.Key, lock.Value, false);
 		}
 	}
-	
-	for (auto lock : newLocks)
-	{		
+
+	for (const TPair<FString, FGitLfsLockInfo>& lock : newLocks)
+	{
 		if (!LockedFiles.Contains(lock.Key))
 		{
 			OnFileLockChanged(lock.Key, lock.Value, true);
-		}		
+		}
 	}
 
 	LockedFiles = newLocks;
 }
 
-void FGitLockedFilesCache::AddLockedFile(const FString& filePath, const FString& lockUser)
+void FGitLockedFilesCache::AddLockedFile(const FString& filePath, const FGitLfsLockInfo& lockInfo)
 {
-	LockedFiles.Add(filePath, lockUser);
-	OnFileLockChanged(filePath, lockUser, true);
+	LockedFiles.Add(filePath, lockInfo);
+	OnFileLockChanged(filePath, lockInfo, true);
 }
 
 void FGitLockedFilesCache::RemoveLockedFile(const FString& filePath)
 {
-	FString user;
-	LockedFiles.RemoveAndCopyValue(filePath, user);
-	OnFileLockChanged(filePath, user, false);
+	FGitLfsLockInfo lockInfo;
+	LockedFiles.RemoveAndCopyValue(filePath, lockInfo);
+	OnFileLockChanged(filePath, lockInfo, false);
 }
 
-void FGitLockedFilesCache::OnFileLockChanged(const FString& filePath, const FString& lockUser, bool locked)
+void FGitLockedFilesCache::OnFileLockChanged(const FString& filePath, const FGitLfsLockInfo& lockInfo, bool locked)
 {
-	const FString& LfsUserName = FGitSourceControlModule::Get().GetProvider().GetLockUser();
-	if (LfsUserName == lockUser)
+	const FString LfsUserName = FGitSourceControlModule::Get().GetProvider().GetLockUser();
+	if (lockInfo.IsOwnedBy(LfsUserName))
 	{
-		FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*filePath, !locked);		
+		FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*filePath, !locked);
 	}
 }
 
@@ -816,41 +819,76 @@ Content\ThirdPersonBP\Blueprints\ThirdPersonCharacter.uasset    SRombauts       
 Content\ThirdPersonBP\Blueprints\ThirdPersonCharacter.uasset                    ID:891
 Content\ThirdPersonBP\Blueprints\ThirdPersonCharacter.uasset    ID:891
  */
-class FGitLfsLocksParser
+namespace
 {
-public:
-	FGitLfsLocksParser(const FString& InRepositoryRoot, const FString& InStatus, const bool bAbsolutePaths = true)
+	bool ParseLfsLockJsonObject(const FString& InRepositoryRoot, const TSharedPtr<FJsonObject>& InJsonObject, bool bHasVerifiedOwnership, bool bIsOwnLock, FString& OutLocalFilename, FGitLfsLockInfo& OutLockInfo)
 	{
-		TArray<FString> Informations;
-		InStatus.ParseIntoArray(Informations, TEXT("\t"), true);
-		
-		if (Informations.Num() >= 2)
+		if (!InJsonObject.IsValid())
 		{
-			Informations[0].TrimEndInline(); // Trim whitespace from the end of the filename
-			Informations[1].TrimEndInline(); // Trim whitespace from the end of the username
-			if (bAbsolutePaths)
-				LocalFilename = FPaths::ConvertRelativePathToFull(InRepositoryRoot, Informations[0]);
-			else
-				LocalFilename = Informations[0];
-			// Filename ID (or we expect it to be the username, but it's empty, or is the ID, we have to assume it's the current user)
-			if (Informations.Num() == 2 || Informations[1].IsEmpty() || Informations[1].StartsWith(TEXT("ID:")))
+			return false;
+		}
+
+		FString RelativePath;
+		if (!InJsonObject->TryGetStringField(TEXT("path"), RelativePath) || RelativePath.IsEmpty())
+		{
+			return false;
+		}
+
+		OutLocalFilename = FPaths::ConvertRelativePathToFull(InRepositoryRoot, RelativePath);
+		FPaths::NormalizeFilename(OutLocalFilename);
+
+		OutLockInfo = FGitLfsLockInfo();
+		OutLockInfo.bHasVerifiedOwnership = bHasVerifiedOwnership;
+		OutLockInfo.bIsOwnLock = bIsOwnLock;
+
+		const TSharedPtr<FJsonObject>* OwnerObject = nullptr;
+		if (InJsonObject->TryGetObjectField(TEXT("owner"), OwnerObject) && OwnerObject && (*OwnerObject).IsValid())
+		{
+			(*OwnerObject)->TryGetStringField(TEXT("name"), OutLockInfo.LockUser);
+			OutLockInfo.LockUser.TrimStartAndEndInline();
+		}
+
+		FString LockedAtString;
+		if (InJsonObject->TryGetStringField(TEXT("locked_at"), LockedAtString) && !LockedAtString.IsEmpty())
+		{
+			FDateTime ParsedDate;
+			if (FDateTime::ParseIso8601(*LockedAtString, ParsedDate))
 			{
-				// TODO: thread safety
-				LockUser = FGitSourceControlModule::Get().GetProvider().GetLockUser();
+				OutLockInfo.LockedAt = ParsedDate;
 			}
-			// Filename Username ID
-			else
+		}
+
+		return true;
+	}
+
+	void CollectLfsLocksFromJsonArray(
+		const FString& InRepositoryRoot,
+		const TArray<TSharedPtr<FJsonValue>>& InArray,
+		bool bHasVerifiedOwnership,
+		bool bIsOwnLock,
+		TMap<FString, FGitLfsLockInfo>& OutLocks,
+		FString* OutDetectedOwnUser = nullptr)
+	{
+		for (const TSharedPtr<FJsonValue>& Entry : InArray)
+		{
+			if (!Entry.IsValid() || Entry->Type != EJson::Object)
 			{
-				LockUser = MoveTemp(Informations[1]);
+				continue;
+			}
+
+			FString LocalFilename;
+			FGitLfsLockInfo LockInfo;
+			if (ParseLfsLockJsonObject(InRepositoryRoot, Entry->AsObject(), bHasVerifiedOwnership, bIsOwnLock, LocalFilename, LockInfo))
+			{
+				if (OutDetectedOwnUser && OutDetectedOwnUser->IsEmpty() && bHasVerifiedOwnership && bIsOwnLock && !LockInfo.LockUser.IsEmpty())
+				{
+					*OutDetectedOwnUser = LockInfo.LockUser;
+				}
+				OutLocks.Add(MoveTemp(LocalFilename), MoveTemp(LockInfo));
 			}
 		}
 	}
-
-	// Filename on disk
-	FString LocalFilename;
-	// Name of user who has file locked
-	FString LockUser;
-};
+}
 
 /**
  * @brief Extract the relative filename from a Git status result.
@@ -1177,9 +1215,9 @@ static void ParseFileStatusResult(const FString& InPathToGitBinary, const FStrin
 		return;
 	}
 	FGitSourceControlProvider& Provider = GitSourceControl->GetProvider();
-	const FString& LfsUserName = Provider.GetLockUser();
+	const FString LfsUserName = Provider.GetLockUser();
 
-	TMap<FString, FString> LockedFiles;
+	TMap<FString, FGitLfsLockInfo> LockedFiles;
 	TMap<FString, FString> Results = InResults;
 	bool bCheckedLockedFiles = false;
 
@@ -1250,10 +1288,11 @@ static void ParseFileStatusResult(const FString& InPathToGitBinary, const FStrin
 						SourceControlLog.Error(FText::FromString(ErrorMessages[ErrorIndex]));
 					}
 				}
-				if (LockedFiles.Contains(File))
+				if (const FGitLfsLockInfo* LockInfo = LockedFiles.Find(File))
 				{
-					FileState.State.LockUser = LockedFiles[File];
-					if (LfsUserName == FileState.State.LockUser)
+					FileState.State.LockUser = LockInfo->LockUser;
+					FileState.State.LockDate = LockInfo->LockedAt;
+					if (LockInfo->IsOwnedBy(LfsUserName))
 					{
 						FileState.State.LockState = ELockState::Locked;
 					}
@@ -1505,7 +1544,82 @@ void CheckRemote(const FString& InPathToGitBinary, const FString& InRepositoryRo
 
 const FTimespan CacheLimit = FTimespan::FromSeconds(30);
 
-bool GetAllLocks(const FString& InRepositoryRoot, const FString& GitBinaryFallback, TArray<FString>& OutErrorMessages, TMap<FString, FString>& OutLocks, bool bInvalidateCache)
+bool AreLockUsersEqual(const FString& UserA, const FString& UserB)
+{
+	return !UserA.IsEmpty() && UserA.Equals(UserB, ESearchCase::IgnoreCase);
+}
+
+bool ParseLfsLocksVerifyJson(const FString& InRepositoryRoot, const FString& InJsonText, TMap<FString, FGitLfsLockInfo>& OutLocks, FString& OutDetectedOwnUser)
+{
+	OutDetectedOwnUser.Empty();
+	TSharedPtr<FJsonObject> RootObject;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(InJsonText);
+	if (!FJsonSerializer::Deserialize(Reader, RootObject) || !RootObject.IsValid())
+	{
+		return false;
+	}
+
+	if (!RootObject->HasField(TEXT("ours")) && !RootObject->HasField(TEXT("theirs")))
+	{
+		return false;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* OursArray = nullptr;
+	if (RootObject->TryGetArrayField(TEXT("ours"), OursArray) && OursArray)
+	{
+		CollectLfsLocksFromJsonArray(InRepositoryRoot, *OursArray, true, true, OutLocks, &OutDetectedOwnUser);
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* TheirsArray = nullptr;
+	if (RootObject->TryGetArrayField(TEXT("theirs"), TheirsArray) && TheirsArray)
+	{
+		CollectLfsLocksFromJsonArray(InRepositoryRoot, *TheirsArray, true, false, OutLocks);
+	}
+
+	return true;
+}
+
+bool ParseLfsLocksListJson(const FString& InRepositoryRoot, const FString& InJsonText, TMap<FString, FGitLfsLockInfo>& OutLocks)
+{
+	const FString Trimmed = InJsonText.TrimStartAndEnd();
+	if (Trimmed.IsEmpty() || Trimmed == TEXT("null"))
+	{
+		return true;
+	}
+
+	TSharedPtr<FJsonValue> RootValue;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Trimmed);
+	if (!FJsonSerializer::Deserialize(Reader, RootValue) || !RootValue.IsValid())
+	{
+		return false;
+	}
+
+	if (RootValue->Type == EJson::Array)
+	{
+		CollectLfsLocksFromJsonArray(InRepositoryRoot, RootValue->AsArray(), false, false, OutLocks);
+		return true;
+	}
+
+	if (RootValue->Type == EJson::Object)
+	{
+		FString LocalFilename;
+		FGitLfsLockInfo LockInfo;
+		if (ParseLfsLockJsonObject(InRepositoryRoot, RootValue->AsObject(), false, false, LocalFilename, LockInfo))
+		{
+			OutLocks.Add(MoveTemp(LocalFilename), MoveTemp(LockInfo));
+		}
+		return true;
+	}
+
+	if (RootValue->Type == EJson::Null)
+	{
+		return true;
+	}
+
+	return false;
+}
+
+bool GetAllLocks(const FString& InRepositoryRoot, const FString& GitBinaryFallback, TArray<FString>& OutErrorMessages, TMap<FString, FGitLfsLockInfo>& OutLocks, bool bInvalidateCache)
 {
 	// You may ask, why are we ignoring state cache, and instead maintaining our own lock cache?
 	// The answer is that state cache updating is another operation, and those that update status
@@ -1525,72 +1639,82 @@ bool GetAllLocks(const FString& InRepositoryRoot, const FString& GitBinaryFallba
 	bool bResult = false;
 	if (bCacheExpired)
 	{
-		// Our cache expired, or they asked us to expire cache. Query locks directly from the remote server.
-		TArray<FString> ErrorMessages;
+		// First try `git lfs locks --verify --json`, which separates `ours` and `theirs` server-side
+		// and exposes the exact authenticated LFS username.
+		TArray<FString> VerifyErrorMessages;
 		TArray<FString> Results;
-		bResult = RunLFSCommand(TEXT("locks"), InRepositoryRoot, GitBinaryFallback, FGitSourceControlModule::GetEmptyStringArray(), FGitSourceControlModule::GetEmptyStringArray(),
-								Results, OutErrorMessages);
+		if (RunLFSCommand(TEXT("locks"), InRepositoryRoot, GitBinaryFallback, { TEXT("--verify"), TEXT("--json") }, FGitSourceControlModule::GetEmptyStringArray(),
+						  Results, VerifyErrorMessages))
+		{
+			FString DetectedOwnUser;
+			if (ParseLfsLocksVerifyJson(InRepositoryRoot, FString::Join(Results, TEXT("\n")), OutLocks, DetectedOwnUser))
+			{
+				bResult = true;
+				if (!DetectedOwnUser.IsEmpty())
+				{
+					if (FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe())
+					{
+						GitSourceControl->GetProvider().QueueAutoDetectedLockUser(DetectedOwnUser);
+					}
+				}
+			}
+		}
+
+		// Fall back to `git lfs locks --json` if `--verify` is unsupported (e.g. file:// remote or older server).
+		if (!bResult)
+		{
+			Results.Reset();
+			TArray<FString> LocksErrorMessages;
+			if (RunLFSCommand(TEXT("locks"), InRepositoryRoot, GitBinaryFallback, { TEXT("--json") }, FGitSourceControlModule::GetEmptyStringArray(),
+							  Results, LocksErrorMessages))
+			{
+				if (ParseLfsLocksListJson(InRepositoryRoot, FString::Join(Results, TEXT("\n")), OutLocks))
+				{
+					bResult = true;
+				}
+			}
+			if (!bResult)
+			{
+				OutErrorMessages.Append(LocksErrorMessages);
+			}
+		}
+
 		if (bResult)
 		{
-			for (const FString& Result : Results)
-			{
-				FGitLfsLocksParser LockFile(InRepositoryRoot, Result);
-#if UE_BUILD_DEBUG && GIT_DEBUG_STATUS
-				UE_LOG(LogSourceControl, Log, TEXT("LockedFile(%s, %s)"), *LockFile.LocalFilename, *LockFile.LockUser);
-#endif
-				OutLocks.Add(MoveTemp(LockFile.LocalFilename), MoveTemp(LockFile.LockUser));
-			}
 			FGitLockedFilesCache::LastUpdated = CurrentTime;
 			FGitLockedFilesCache::SetLockedFiles(OutLocks);
-			return bResult;
+			return true;
 		}
-		// We tried to invalidate the UE cache, but we failed for some reason. Try updating lock state from LFS cache.
-		// Get the last known state of remote locks
-		TArray<FString> Params;
-		Params.Add(TEXT("--cached"));
 
-		FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe();
-		if (!GitSourceControl)
+		// Server query failed (e.g. offline): merge `--cached --json` (others) and `--local --json` (ours).
+		if (FGitSourceControlModule* GitSourceControl = FGitSourceControlModule::GetThreadSafe())
 		{
-			bResult = false;
-		}
-		else
-		{
-			FGitSourceControlProvider& Provider = GitSourceControl->GetProvider();
-			const FString& LockUser = Provider.GetLockUser();
-
-			Results.Reset();
-			bResult = RunLFSCommand(TEXT("locks"), InRepositoryRoot, GitBinaryFallback, Params, FGitSourceControlModule::GetEmptyStringArray(), Results, OutErrorMessages);
-			for (const FString& Result : Results)
+			const FString LockUser = GitSourceControl->GetProvider().GetLockUser();
+			auto QueryOfflineLocks = [&](const TCHAR* ScopeFlag, bool bSelectOwnLocks) -> bool
 			{
-				FGitLfsLocksParser LockFile(InRepositoryRoot, Result);
-	#if UE_BUILD_DEBUG && GIT_DEBUG_STATUS
-				UE_LOG(LogSourceControl, Log, TEXT("LockedFile(%s, %s)"), *LockFile.LocalFilename, *LockFile.LockUser);
-	#endif
-				// Only update remote locks
-				if (LockFile.LockUser != LockUser)
+				TArray<FString> LocalResults;
+				if (!RunLFSCommand(TEXT("locks"), InRepositoryRoot, GitBinaryFallback, { ScopeFlag, TEXT("--json") }, FGitSourceControlModule::GetEmptyStringArray(), LocalResults, OutErrorMessages))
 				{
-					OutLocks.Add(MoveTemp(LockFile.LocalFilename), MoveTemp(LockFile.LockUser));
+					return false;
 				}
-			}
-			// Get the latest local state of our own locks
-			Params.Reset(1);
-			Params.Add(TEXT("--local"));
+				TMap<FString, FGitLfsLockInfo> ParsedLocks;
+				if (!ParseLfsLocksListJson(InRepositoryRoot, FString::Join(LocalResults, TEXT("\n")), ParsedLocks))
+				{
+					return false;
+				}
+				for (TPair<FString, FGitLfsLockInfo>& Entry : ParsedLocks)
+				{
+					if (AreLockUsersEqual(Entry.Value.LockUser, LockUser) == bSelectOwnLocks)
+					{
+						OutLocks.Add(MoveTemp(Entry.Key), MoveTemp(Entry.Value));
+					}
+				}
+				return true;
+			};
 
-			Results.Reset();
-			bResult &= RunLFSCommand(TEXT("locks"), InRepositoryRoot, GitBinaryFallback, Params, FGitSourceControlModule::GetEmptyStringArray(), Results, OutErrorMessages);
-			for (const FString& Result : Results)
-			{
-				FGitLfsLocksParser LockFile(InRepositoryRoot, Result);
-	#if UE_BUILD_DEBUG && GIT_DEBUG_STATUS
-				UE_LOG(LogSourceControl, Log, TEXT("LockedFile(%s, %s)"), *LockFile.LocalFilename, *LockFile.LockUser);
-	#endif
-				// Only update local locks
-				if (LockFile.LockUser == LockUser)
-				{
-					OutLocks.Add(MoveTemp(LockFile.LocalFilename), MoveTemp(LockFile.LockUser));
-				}
-			}
+			const bool bCachedOk = QueryOfflineLocks(TEXT("--cached"), false);
+			const bool bLocalOk = QueryOfflineLocks(TEXT("--local"), true);
+			bResult = bCachedOk && bLocalOk;
 		}
 	}
 	if (!bResult)
@@ -2092,6 +2216,7 @@ bool UpdateCachedStates(const TMap<const FString, FGitState>& InResults)
 		{
 			State->State.LockState = NewState.LockState;
 			State->State.LockUser = NewState.LockUser;
+			State->State.LockDate = NewState.LockDate;
 		}
 		if (NewState.RemoteState != ERemoteState::Unset)
 		{
@@ -2254,7 +2379,7 @@ bool FetchRemote(const FString& InPathToGitBinary, const FString& InPathToReposi
 	// Force refresh lock states
 	if (InUsingGitLfsLocking)
 	{
-		TMap<FString, FString> Locks;
+		TMap<FString, FGitLfsLockInfo> Locks;
 		GetAllLocks(InPathToRepositoryRoot, InPathToGitBinary, OutErrorMessages, Locks, true);
 	}
 

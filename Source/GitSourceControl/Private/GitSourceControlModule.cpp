@@ -15,6 +15,7 @@
 #include "ContentBrowserDelegates.h"
 
 #include "GitSourceControlOperations.h"
+#include "GitSourceControlStyle.h"
 #include "GitSourceControlUtils.h"
 #include "ISourceControlModule.h"
 #include "SourceControlHelpers.h"
@@ -42,6 +43,8 @@ static TSharedRef<IGitSourceControlWorker, ESPMode::ThreadSafe> CreateWorker()
 
 void FGitSourceControlModule::StartupModule()
 {
+	FGitSourceControlStyle::Initialize();
+
 	// Register our operations (implemented in GitSourceControlOperations.cpp by subclassing from Engine\Source\Developer\SourceControl\Public\SourceControlOperations.h)
 	GitSourceControlProvider.RegisterWorker( "Connect", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitConnectWorker> ) );
 	// Note: this provider uses the "CheckOut" command only with Git LFS 2 "lock" command, since Git itself has no lock command (all tracked files in the working copy are always already checked-out).
@@ -50,6 +53,7 @@ void FGitSourceControlModule::StartupModule()
 	GitSourceControlProvider.RegisterWorker( "MarkForAdd", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitMarkForAddWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Delete", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitDeleteWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Revert", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitRevertWorker> ) );
+	GitSourceControlProvider.RegisterWorker( "RevertAndUnlock", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitRevertAndUnlockWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Fetch", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitFetchWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Copy", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitCopyWorker> ) );
 	GitSourceControlProvider.RegisterWorker( "Resolve", FGetGitSourceControlWorker::CreateStatic( &CreateWorker<FGitResolveWorker> ) );
@@ -112,6 +116,8 @@ void FGitSourceControlModule::ShutdownModule()
 
 	// unbind provider from editor
     IModularFeatures::Get().UnregisterModularFeature( NAME_SourceControl, &GitSourceControlProvider );
+
+	FGitSourceControlStyle::Shutdown();
 
 
 	// Unregister ContentBrowserDelegate Handles

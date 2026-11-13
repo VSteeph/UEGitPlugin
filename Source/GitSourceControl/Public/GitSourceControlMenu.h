@@ -18,15 +18,22 @@ public:
 	void Unregister();
 	
 	/** This functions will be bound to appropriate Command. */
-	void RevertClicked();
+	void RevertChangesClicked();
+	void RevertAndUnlockClicked();
 	void RefreshClicked();
 
 protected:
-	static void RevertAllCallback(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult);
+	static void RevertAllCallback(const FSourceControlOperationRef& InOperation, ECommandResult::Type InResult, bool bUnlockAfterRevert);
 	static void RevertAllCancelled(FSourceControlOperationRef InOperation);
 
 private:
+	void RevertClickedInternal(bool bUnlockAfterRevert);
+	bool CanRevertClicked(bool bUnlockAfterRevert) const;
+
 	void AddMenuExtension(FToolMenuSection& Builder);
+	static void ExtendContentBrowserSourceControlSubMenu(class UToolMenu* Menu);
+	static void ExecuteContentBrowserRevertChanges(TArray<FString> PackageNames);
+	static void ExecuteContentBrowserRevertAndUnlock(TArray<FString> PackageNames);
 
 	static void DisplayInProgressNotification(const FText& InOperationInProgressString);
 	static void RemoveInProgressNotification();
