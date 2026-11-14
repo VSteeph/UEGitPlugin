@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 316,
-	"VersionName": "3.16",
+	"Version": 400,
+	"VersionName": "4.0",
 	"FriendlyName": "Git LFS 2",
 	"Description": "Git LFS lock manager for Unreal Engine teams: lock assets before editing them, see who holds each lock, release locks automatically.",
 	"Category": "Source Control",
